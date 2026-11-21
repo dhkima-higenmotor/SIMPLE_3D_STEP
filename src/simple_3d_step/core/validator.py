@@ -50,7 +50,7 @@ def validate_shape(shape: TopoDS_Shape) -> ValidationReport:
             volume=0.0,
             surface_area=0.0,
             bbox_size=(0.0, 0.0, 0.0),
-            warnings=["결과 형상이 비어 있습니다."],
+            warnings=["Resulting shape is empty."],
         )
 
     def _count(shape_type) -> int:
@@ -88,7 +88,7 @@ def validate_shape(shape: TopoDS_Shape) -> ValidationReport:
                     free_edge_count += 1
                     exp_e.Next()
     except Exception as exc:
-        warnings.append(f"자유 엣지 검사 중 경고: {exc}")
+        warnings.append(f"Free-edge check warning: {exc}")
 
     vol_props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, vol_props)
@@ -114,23 +114,23 @@ def validate_shape(shape: TopoDS_Shape) -> ValidationReport:
     brep_valid = bool(analyzer.IsValid())
 
     if solid_count == 0:
-        warnings.append("Solid가 생성되지 않았습니다(Shell/Surface 상태).")
+        warnings.append("No solid created (shape is a shell/surface).")
     elif solid_count > 1:
-        warnings.append(f"단일 Body가 아닌 {solid_count}개의 분리된 Solid가 존재합니다.")
+        warnings.append(f"Found {solid_count} separate solids instead of a single body.")
 
     if solid_count == 1 and shell_count > 1:
         warnings.append(
-            f"Solid 내부에 {shell_count - 1}개의 미제거 내부 공동(Void Shell)이 남아 있습니다."
+            f"{shell_count - 1} unremoved internal void shell(s) remain inside the solid."
         )
 
     if free_edge_count > 0:
-        warnings.append(f"열린 자유 엣지가 {free_edge_count}개 감지되었습니다(비밀폐).")
+        warnings.append(f"Detected {free_edge_count} open free edge(s) (non-watertight).")
 
     if volume <= 0.0:
-        warnings.append(f"부피가 0 이하입니다 ({volume:.3f}). 방향이 반전되었을 수 있습니다.")
+        warnings.append(f"Volume is non-positive ({volume:.3f}); orientation may be inverted.")
 
     if not brep_valid:
-        warnings.append("BRepCheck_Analyzer 위상 유효성 경고가 존재합니다.")
+        warnings.append("BRepCheck_Analyzer reported topological validity warnings.")
 
     is_watertight = solid_count >= 1 and free_edge_count == 0 and volume > 0.0
 

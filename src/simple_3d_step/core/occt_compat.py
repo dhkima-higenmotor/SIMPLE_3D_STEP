@@ -15,6 +15,8 @@ from OCP.TopoDS import (
 try:
     from OCP.collections import (
         HSequence_TopoDS_Shape as ShapeHSequence,
+        IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher as ShapeIndexedDataMapOfList,
+        IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher as ShapeIndexedMap,
         List_TopoDS_Shape as ShapeList,
         Sequence_TDF_Label as LabelSequence,
     )
@@ -22,6 +24,8 @@ except ImportError:
     from OCP.TDF import TDF_LabelSequence as LabelSequence  # type: ignore[no-redef]
     from OCP.TopTools import (  # type: ignore[no-redef]
         TopTools_HSequenceOfShape as ShapeHSequence,
+        TopTools_IndexedDataMapOfShapeListOfShape as ShapeIndexedDataMapOfList,
+        TopTools_IndexedMapOfShape as ShapeIndexedMap,
         TopTools_ListOfShape as ShapeList,
     )
 
@@ -54,6 +58,8 @@ def to_wire(shape: TopoDS_Shape) -> TopoDS_Wire:
 __all__ = [
     "LabelSequence",
     "ShapeHSequence",
+    "ShapeIndexedDataMapOfList",
+    "ShapeIndexedMap",
     "ShapeList",
     "to_edge",
     "to_face",

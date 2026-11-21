@@ -79,15 +79,15 @@ def launch_external_viewer(step_file: Path, config: AppConfig) -> str:
     """Launch the configured external 3D viewer with the given STEP file."""
     target = Path(step_file).resolve()
     if not target.exists():
-        raise FileNotFoundError(f"STEP 파일을 찾을 수 없습니다: {target}")
+        raise FileNotFoundError(f"STEP file not found: {target}")
 
     exe = config.viewer_executable.strip()
     if exe:
         exe_path = Path(exe)
         if not exe_path.exists():
             raise FileNotFoundError(
-                f"설정된 외부 3D 뷰어 실행 파일을 찾을 수 없습니다:\n{exe_path}\n"
-                "설정 메뉴에서 실행 파일 경로를 확인해 주세요."
+                f"Configured external 3D viewer executable not found:\n{exe_path}\n"
+                "Please verify the path in Viewer Settings."
             )
 
         args_template = (config.viewer_args or "{file}").strip()
@@ -104,12 +104,12 @@ def launch_external_viewer(step_file: Path, config: AppConfig) -> str:
 
         cmd = [str(exe_path)] + cmd_args
         subprocess.Popen(cmd)
-        return f"외부 뷰어 실행: {exe_path.name} ({target.name})"
+        return f"Launched external viewer: {exe_path.name} ({target.name})"
 
     if os.name == "nt":
         os.startfile(str(target))  # type: ignore[attr-defined]
-        return f"시스템 기본 연결 프로그램으로 열기: {target.name}"
+        return f"Opened with Windows default application: {target.name}"
 
     raise RuntimeError(
-        "외부 3D 뷰어 실행 파일이 설정되지 않았습니다. config.json 또는 설정 메뉴에서 지정해 주세요."
+        "No external 3D viewer executable configured. Set it in config.json or Viewer Settings."
     )

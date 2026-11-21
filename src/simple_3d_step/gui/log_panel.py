@@ -28,12 +28,12 @@ class LogPanel(tk.Frame):
             highlightthickness=1,
         )
         self._on_cancel = on_cancel
-        self._status_var = tk.StringVar(value="준비 완료 — STEP 파일을 열어 시작하세요.")
+        self._status_var = tk.StringVar(value="Ready — click [Open STEP] to load an assembly.")
         self._progress_var = tk.DoubleVar(value=0.0)
         self._busy = False
         self._spin_idx = 0
         self._spin_after_id: Optional[str] = None
-        self._base_status = "준비 완료 — STEP 파일을 열어 시작하세요."
+        self._base_status = "Ready — click [Open STEP] to load an assembly."
 
         self._build_ui()
 
@@ -59,7 +59,7 @@ class LogPanel(tk.Frame):
 
         self._cancel_btn = ttk.Button(
             status_row,
-            text="작업 취소",
+            text="Cancel",
             style="Small.TButton",
             command=self._handle_cancel,
             state=tk.DISABLED,
@@ -69,7 +69,7 @@ class LogPanel(tk.Frame):
 
         ttk.Button(
             status_row,
-            text="로그 지우기",
+            text="Clear Log",
             style="Small.TButton",
             command=self.clear_log,
             width=10,

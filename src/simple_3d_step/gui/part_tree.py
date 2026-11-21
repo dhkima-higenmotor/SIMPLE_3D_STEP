@@ -31,8 +31,8 @@ class PartTreePanel(tk.Frame):
         self._on_selection_changed = on_selection_changed
 
         self._search_var = tk.StringVar(value="")
-        self._filter_var = tk.StringVar(value="전체")
-        self._summary_var = tk.StringVar(value="로드된 부품 없음")
+        self._filter_var = tk.StringVar(value="All")
+        self._summary_var = tk.StringVar(value="No parts loaded")
         self._sort_col: str = "id"
         self._sort_reverse: bool = False
 
@@ -43,41 +43,41 @@ class PartTreePanel(tk.Frame):
         top_bar = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 7))
         top_bar.pack(fill=tk.X)
 
-        ttk.Label(top_bar, text="검색", style="Subtle.TLabel", font=FONTS["small_bold"]).pack(
+        ttk.Label(top_bar, text="Search", style="Subtle.TLabel", font=FONTS["small_bold"]).pack(
             side=tk.LEFT
         )
         search_entry = ttk.Entry(top_bar, textvariable=self._search_var, width=14)
         search_entry.pack(side=tk.LEFT, padx=(6, 10))
         self._search_var.trace_add("write", lambda *_: self.refresh_view())
 
-        ttk.Label(top_bar, text="필터", style="Subtle.TLabel", font=FONTS["small_bold"]).pack(
+        ttk.Label(top_bar, text="Filter", style="Subtle.TLabel", font=FONTS["small_bold"]).pack(
             side=tk.LEFT
         )
         filter_combo = ttk.Combobox(
             top_bar,
             textvariable=self._filter_var,
-            values=("전체", "유지(외부)", "삭제(내부)", "수동 변경"),
+            values=("All", "Keep (External)", "Drop (Internal)", "Manual Override"),
             state="readonly",
-            width=10,
+            width=15,
         )
         filter_combo.pack(side=tk.LEFT, padx=(6, 10))
         filter_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_view())
 
         ttk.Button(
             top_bar,
-            text="선택 유지",
+            text="Keep Selected",
             style="Small.TButton",
             command=lambda: self._set_selected_keep(True),
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             top_bar,
-            text="선택 삭제",
+            text="Drop Selected",
             style="Small.TButton",
             command=lambda: self._set_selected_keep(False),
         ).pack(side=tk.LEFT, padx=2)
         ttk.Button(
             top_bar,
-            text="자동 분류 복원",
+            text="Reset Overrides",
             style="Small.TButton",
             command=self._reset_manual_overrides,
         ).pack(side=tk.LEFT, padx=(6, 0))
@@ -97,14 +97,14 @@ class PartTreePanel(tk.Frame):
         )
 
         headings = {
-            "keep": ("유지", 68, tk.CENTER),
+            "keep": ("Keep", 68, tk.CENTER),
             "id": ("#", 58, tk.E),
-            "name": ("부품명", 260, tk.W),
-            "visibility": ("가시성(%)", 118, tk.E),
-            "volume": ("부피(mm³)", 135, tk.E),
-            "faces": ("면 수", 82, tk.E),
-            "status": ("분류 상태", 125, tk.CENTER),
-            "path": ("어셈블리 경로", 300, tk.W),
+            "name": ("Part Name", 260, tk.W),
+            "visibility": ("Visibility (%)", 130, tk.E),
+            "volume": ("Volume (mm³)", 140, tk.E),
+            "faces": ("Faces", 82, tk.E),
+            "status": ("Status", 145, tk.CENTER),
+            "path": ("Assembly Path", 300, tk.W),
         }
 
         for col, (label, width, anchor) in headings.items():
@@ -149,7 +149,7 @@ class PartTreePanel(tk.Frame):
         ).pack(side=tk.LEFT)
         ttk.Label(
             summary_frame,
-            text="더블클릭 또는 Space 키로 유지/삭제 전환",
+            text="Double-click or press Space to toggle Keep/Drop",
             style="Subtle.TLabel",
             foreground=COLORS["text_muted"],
             font=FONTS["small"],
@@ -171,11 +171,11 @@ class PartTreePanel(tk.Frame):
         for p in self._parts:
             if query and query not in p.name.lower() and query not in p.assembly_path.lower():
                 continue
-            if filt == "유지(외부)" and not p.keep:
+            if filt == "Keep (External)" and not p.keep:
                 continue
-            if filt == "삭제(내부)" and p.keep:
+            if filt == "Drop (Internal)" and p.keep:
                 continue
-            if filt == "수동 변경" and not p.user_overridden:
+            if filt == "Manual Override" and not p.user_overridden:
                 continue
             filtered.append(p)
 
@@ -236,13 +236,13 @@ class PartTreePanel(tk.Frame):
     def _update_summary(self) -> None:
         total = len(self._parts)
         if total == 0:
-            self._summary_var.set("로드된 부품 없음")
+            self._summary_var.set("No parts loaded")
             return
         kept = [p for p in self._parts if p.keep]
         dropped = total - len(kept)
         kept_vol = sum(max(p.volume, 0.0) for p in kept)
         self._summary_var.set(
-            f"전체 {total}개  ·  유지(외관) {len(kept)}개  ·  삭제(내부) {dropped}개  ·  유지 부피 {kept_vol:,.1f} mm³"
+            f"Total: {total}  ·  Keep (Outer): {len(kept)}  ·  Drop (Inner): {dropped}  ·  Kept Vol: {kept_vol:,.1f} mm³"
         )
 
     def _sort_by(self, col: str) -> None:

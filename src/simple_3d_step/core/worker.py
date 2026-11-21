@@ -147,7 +147,7 @@ def cad_worker_main(
 
             elif cmd_name == "analyze_visibility":
                 if assembly is None:
-                    raise RuntimeError("먼저 STEP 파일을 열어 주세요.")
+                    raise RuntimeError("Please open a STEP file first.")
                 _apply_overrides(assembly, payload.get("overrides"))
                 vis_cfg: VisibilityConfig = payload["config"]
                 vis_res = analyze_visibility(
@@ -176,7 +176,7 @@ def cad_worker_main(
 
             elif cmd_name == "simplify":
                 if assembly is None:
-                    raise RuntimeError("먼저 STEP 파일을 열어 주세요.")
+                    raise RuntimeError("Please open a STEP file first.")
                 _apply_overrides(assembly, payload.get("overrides"))
                 simp_cfg: SimplifyConfig = payload["config"]
                 result = simplify_assembly_to_single_solid(
@@ -194,15 +194,15 @@ def cad_worker_main(
 
             elif cmd_name == "save_result":
                 if result is None or result.shape is None or assembly is None:
-                    raise RuntimeError("저장할 단순화 결과가 없습니다.")
+                    raise RuntimeError("No simplification result available to save.")
                 out_path = Path(payload["output_path"])
                 schema = str(payload.get("schema", "AP214"))
-                _progress(0.25, f"STEP 파일 저장 중: {out_path.name}")
+                _progress(0.25, f"Saving STEP file: {out_path.name}")
                 saved = save_shape_to_step(
                     result.shape, out_path, schema=schema, unit=assembly.unit
                 )
                 result.output_path = saved
-                _progress(1.0, "저장 완료")
+                _progress(1.0, "Save complete")
                 evt_queue.put(
                     (
                         "done",
@@ -219,17 +219,17 @@ def cad_worker_main(
 
             elif cmd_name == "export_kept_preview":
                 if assembly is None:
-                    raise RuntimeError("로드된 STEP 파일이 없습니다.")
+                    raise RuntimeError("No STEP file is loaded.")
                 _apply_overrides(assembly, payload.get("overrides"))
                 kept = [p for p in assembly.parts if p.keep]
                 if not kept:
-                    raise ValueError("유지 선택된 부품이 없습니다.")
+                    raise ValueError("No kept parts are selected.")
                 out_path = Path(payload["output_path"])
                 schema = str(payload.get("schema", "AP214"))
-                _progress(0.3, f"유지 부품 {len(kept)}개 임시 STEP 생성 중...")
+                _progress(0.3, f"Exporting temporary preview STEP for {len(kept)} kept parts...")
                 comp = make_compound_from_parts(kept)
                 saved = save_shape_to_step(comp, out_path, schema=schema, unit=assembly.unit)
-                _progress(1.0, "임시 STEP 생성 완료")
+                _progress(1.0, "Temporary preview STEP ready")
                 evt_queue.put(
                     (
                         "done",
@@ -239,17 +239,17 @@ def cad_worker_main(
 
             elif cmd_name == "export_result_preview":
                 if result is None or result.shape is None or assembly is None:
-                    raise RuntimeError("미리보기할 단순화 결과가 없습니다.")
+                    raise RuntimeError("No simplification result available to preview.")
                 if result.output_path and result.output_path.exists():
                     saved = result.output_path
                 else:
                     out_path = Path(payload["output_path"])
                     schema = str(payload.get("schema", "AP214"))
-                    _progress(0.35, "단순화 결과 임시 STEP 생성 중...")
+                    _progress(0.35, "Exporting temporary result preview STEP...")
                     saved = save_shape_to_step(
                         result.shape, out_path, schema=schema, unit=assembly.unit
                     )
-                _progress(1.0, "임시 STEP 생성 완료")
+                _progress(1.0, "Temporary preview STEP ready")
                 evt_queue.put(
                     (
                         "done",
@@ -258,7 +258,7 @@ def cad_worker_main(
                 )
 
             else:
-                raise ValueError(f"알 수 없는 워커 명령: {cmd_name}")
+                raise ValueError(f"Unknown worker command: {cmd_name}")
 
         except InterruptedError as exc:
             evt_queue.put(("cancelled", (cmd_id, cmd_name, str(exc))))
@@ -371,7 +371,7 @@ class CadWorkerClient:
             events.append(
                 WorkerEvent(
                     kind="crashed",
-                    payload=(crashed_id, crashed_name, "백그라운드 CAD 프로세스가 예기치 않게 종료되었습니다."),
+                    payload=(crashed_id, crashed_name, "Background CAD worker terminated unexpectedly."),
                 )
             )
             self.start()

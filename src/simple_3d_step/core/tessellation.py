@@ -136,11 +136,11 @@ def tessellate_assembly(
 
     for idx, part in enumerate(assembly.parts):
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
 
         if progress_cb and (idx % max(1, n_parts // 25) == 0 or idx == n_parts - 1):
             frac = (idx + 1) / max(n_parts, 1)
-            progress_cb(frac * 0.35, f"메시 생성 중 ({idx + 1}/{n_parts}): {part.name}")
+            progress_cb(frac * 0.35, f"Tessellating ({idx + 1}/{n_parts}): {part.name}")
 
         # Use finer deflection for very small parts so they don't collapse
         part_diag = max(part.bbox_diagonal, 1e-3)

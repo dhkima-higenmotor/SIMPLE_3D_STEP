@@ -5,9 +5,20 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from simple_3d_step.gui.app import Simple3DStepApp
 from simple_3d_step.gui.theme import STEP_STYLES
 from simple_3d_step.models import AssemblyModel, SimplifyResult, ValidationReport
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent GUI tests from overwriting the user's real config.json."""
+    monkeypatch.setattr(
+        "simple_3d_step.gui.app.get_default_config_path",
+        lambda: tmp_path / "test_config.json",
+    )
 
 
 def test_gui_default_layout_no_menu_no_clipping_and_params_toggle() -> None:
@@ -35,7 +46,7 @@ def test_gui_default_layout_no_menu_no_clipping_and_params_toggle() -> None:
         # 5. Toggle parameters ON + show BusyBanner simultaneously (worst-case height)
         app._params_visible_var.set(True)
         app._toggle_params_panel()
-        app._show_busy_banner("테스트 작업")
+        app._show_busy_banner("Test Task")
         app.update()
 
         assert len(app._main_pane.panes()) == 2
@@ -108,14 +119,22 @@ def test_workflow_step_buttons_visual_completion_states() -> None:
     app = Simple3DStepApp()
     try:
         app.update()
-        # Initially all 4 workflow buttons are idle
+        # Verify Row-1 primary workflow button label is English
+        assert app._tb_open.cget("text") == "Open STEP"
+
+        # Initially all 4 workflow buttons are idle and bold
         for key in ("open", "analyze", "simplify", "save"):
             assert app._step_states[key] == "idle"
             btn, label = app._step_buttons[key]
             assert btn.cget("text") == label
             assert btn.cget("background") == STEP_STYLES["idle"]["bg"]
+            assert "bold" in str(btn.cget("font")).lower()
 
-        # Mark steps done sequentially
+        # Verify running state preserves bold font
+        app._apply_step_style("analyze", "running")
+        assert "bold" in str(app._step_buttons["analyze"][0].cget("font")).lower()
+
+        # Mark steps done sequentially and verify bold font persists
         app._apply_step_style("open", "done")
         app._apply_step_style("analyze", "done")
         app._apply_step_style("simplify", "done")
@@ -125,13 +144,16 @@ def test_workflow_step_buttons_visual_completion_states() -> None:
             assert btn.cget("text") == f"✔ {label}"
             assert btn.cget("background") == STEP_STYLES["done"]["bg"]
             assert btn.cget("foreground") == STEP_STYLES["done"]["fg"]
+            assert "bold" in str(btn.cget("font")).lower()
 
-        # Manual part selection modification resets downstream simplify & save states
+        # Manual part selection modification resets downstream simplify & save states (still bold)
         app._on_part_selection_modified()
         assert app._step_states["open"] == "done"
         assert app._step_states["analyze"] == "done"
         assert app._step_states["simplify"] == "idle"
         assert app._step_states["save"] == "idle"
+        for key in ("simplify", "save"):
+            assert "bold" in str(app._step_buttons[key][0].cget("font")).lower()
     finally:
         app._on_close()
 

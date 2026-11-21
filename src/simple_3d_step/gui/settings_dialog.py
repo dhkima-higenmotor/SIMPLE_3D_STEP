@@ -22,7 +22,7 @@ class SettingsDialog(tk.Toplevel):
         on_saved: Optional[Callable[[AppConfig], None]] = None,
     ) -> None:
         super().__init__(parent)
-        self.title("외부 3D 뷰어 및 환경 설정")
+        self.title("External 3D Viewer & Preferences")
         self.configure(background=COLORS["surface"])
         self.transient(parent)
         self.grab_set()
@@ -46,11 +46,11 @@ class SettingsDialog(tk.Toplevel):
 
         ttk.Label(
             container,
-            text="외부 3D 뷰어 실행 파일",
+            text="External 3D Viewer Executable",
             style="SectionTitle.TLabel",
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
 
-        ttk.Label(container, text="실행 파일 경로:", style="Card.TLabel").grid(
+        ttk.Label(container, text="Executable Path:", style="Card.TLabel").grid(
             row=1, column=0, sticky=tk.W, pady=(0, 8)
         )
 
@@ -62,16 +62,16 @@ class SettingsDialog(tk.Toplevel):
             row=0, column=0, sticky=tk.EW
         )
         ttk.Button(
-            path_frame, text="찾아보기...", style="Small.TButton", command=self._browse_exe
+            path_frame, text="Browse...", style="Small.TButton", command=self._browse_exe
         ).grid(row=0, column=1, padx=(6, 0))
         ttk.Button(
             path_frame,
-            text="초기화",
+            text="Clear",
             style="Small.TButton",
             command=lambda: self._viewer_var.set(""),
         ).grid(row=0, column=2, padx=(4, 0))
 
-        ttk.Label(container, text="실행 인자 템플릿:", style="Card.TLabel").grid(
+        ttk.Label(container, text="Argument Template:", style="Card.TLabel").grid(
             row=2, column=0, sticky=tk.W, pady=(0, 8)
         )
 
@@ -90,9 +90,9 @@ class SettingsDialog(tk.Toplevel):
         info_box.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(4, 14))
 
         help_text = (
-            "• 실행 파일 경로를 비워 두면 Windows 기본 연결 프로그램으로 STEP 파일을 엽니다.\n"
-            "• 실행 인자의 {file} 위치에 STEP 파일 경로가 자동 대입됩니다. (예: {file} 또는 --open {file})\n"
-            f"• 설정 파일 위치: {self._config_path}"
+            "• Leave the executable path empty to open STEP files with the Windows default application.\n"
+            "• {file} in the argument template is replaced with the STEP file path (e.g. {file} or --open {file}).\n"
+            f"• Config file path: {self._config_path}"
         )
         tk.Label(
             info_box,
@@ -108,9 +108,9 @@ class SettingsDialog(tk.Toplevel):
         btn_frame = ttk.Frame(container, style="Card.TFrame")
         btn_frame.grid(row=4, column=0, columnspan=2, sticky=tk.E)
         ttk.Button(
-            btn_frame, text="저장", style="Primary.TButton", command=self._save, width=10
+            btn_frame, text="Save", style="Primary.TButton", command=self._save, width=10
         ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btn_frame, text="취소", command=self.destroy, width=10).pack(
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy, width=10).pack(
             side=tk.LEFT
         )
 
@@ -124,9 +124,9 @@ class SettingsDialog(tk.Toplevel):
             initial = Path.home()
         selected = filedialog.askopenfilename(
             parent=self,
-            title="외부 3D 뷰어 실행 파일 선택",
+            title="Select External 3D Viewer Executable",
             initialdir=str(initial),
-            filetypes=[("실행 파일", "*.exe;*.bat;*.cmd"), ("모든 파일", "*.*")],
+            filetypes=[("Executables", "*.exe;*.bat;*.cmd"), ("All Files", "*.*")],
         )
         if selected:
             self._viewer_var.set(selected)
@@ -135,8 +135,8 @@ class SettingsDialog(tk.Toplevel):
         exe = self._viewer_var.get().strip()
         if exe and not Path(exe).exists():
             if not messagebox.askyesno(
-                "경로 확인",
-                f"지정한 실행 파일이 현재 존재하지 않습니다:\n{exe}\n그래도 저장하시겠습니까?",
+                "Confirm Path",
+                f"The specified executable does not currently exist:\n{exe}\nSave anyway?",
                 parent=self,
             ):
                 return

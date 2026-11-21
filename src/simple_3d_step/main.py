@@ -26,9 +26,9 @@ def _run_cli(args: argparse.Namespace) -> int:
     def _log_prog(frac: float, msg: str) -> None:
         print(f"[{frac * 100:5.1f}%] {msg}")
 
-    print(f"입력 STEP: {in_path}")
+    print(f"Input STEP: {in_path}")
     asm = load_step_assembly(in_path, progress_cb=_log_prog)
-    print(f"로드 완료: 부품 {len(asm.parts)}개")
+    print(f"Loaded: {len(asm.parts)} parts")
 
     vis_cfg = VisibilityConfig(
         num_views=args.views,
@@ -36,7 +36,7 @@ def _run_cli(args: argparse.Namespace) -> int:
         min_visible_ratio=args.min_visible / 100.0,
     )
     vis = analyze_visibility(asm, vis_cfg, progress_cb=_log_prog)
-    print(f"가시성 분석: 외부 유지 {vis.external_count}개 / 내부 삭제 {vis.internal_count}개")
+    print(f"Visibility analysis: keep {vis.external_count} external / drop {vis.internal_count} internal")
 
     simp_cfg = SimplifyConfig(
         fill_internal_core=not args.no_core,
@@ -53,16 +53,16 @@ def _run_cli(args: argparse.Namespace) -> int:
     saved = save_shape_to_step(res.shape, out_path, schema=simp_cfg.step_schema, unit=asm.unit)
 
     v = res.validation
-    print(f"\n=== 완료 ({res.mode_used}, {res.elapsed_seconds:.2f}s) ===")
-    print(f"출력 STEP: {saved} ({saved.stat().st_size / (1024 * 1024):.2f} MB)")
+    print(f"\n=== Completed ({res.mode_used}, {res.elapsed_seconds:.2f}s) ===")
+    print(f"Output STEP: {saved} ({saved.stat().st_size / (1024 * 1024):.2f} MB)")
     print(
         f"Solid={v.solid_count}, Shell={v.shell_count}, Faces={v.face_count:,}, "
         f"Watertight={v.is_watertight}, Volume={v.volume:,.1f} mm³ (+{res.filled_volume_delta:,.1f})"
     )
     if v.face_types:
-        print("곡면 구성:", v.face_types)
+        print("Surface types:", v.face_types)
     for w in v.warnings:
-        print(f"  [경고] {w}")
+        print(f"  [Warning] {w}")
     return 0
 
 
@@ -70,23 +70,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(
         prog="simple-3d-step",
-        description="3D STEP 내부 부품 자동 삭제 및 외관 보존 정밀 B-Rep 단일 Solid 변환 도구",
+        description="Remove internal STEP assembly parts and convert exterior B-Rep into a single solid body",
     )
-    parser.add_argument("step_file", nargs="?", help="GUI 시작 시 바로 열 STEP 파일 경로")
-    parser.add_argument("--cli", action="store_true", help="GUI 없이 CLI 배치 모드로 실행")
-    parser.add_argument("-i", "--input", help="CLI 입력 STEP 파일 경로")
-    parser.add_argument("-o", "--output", help="CLI 출력 STEP 파일 경로")
-    parser.add_argument("--views", type=int, default=64, help="가시성 분석 구면 시점 수")
-    parser.add_argument("--grid", type=int, default=160, help="시점당 광선 격자 해상도")
-    parser.add_argument("--min-visible", type=float, default=0.5, help="최소 가시성 임계값(%%)")
-    parser.add_argument("--bridge-gap", type=float, default=3.5, help="내부 코어 브리지 간극(mm)")
-    parser.add_argument("--core-inset", type=float, default=2.0, help="외관 보호 안전 여백(mm)")
-    parser.add_argument("--island-gap", type=float, default=3.0, help="분리 부품 내부 연결 간격(mm)")
-    parser.add_argument("--no-core", action="store_true", help="내부 코어 생성 비활성화")
-    parser.add_argument("--no-island-bridge", action="store_true", help="분리 부품 내부 연결 비활성화")
-    parser.add_argument("--remove-holes", action="store_true", help="외관 소구경 관통홀 막기 활성화")
-    parser.add_argument("--max-hole-dia", type=float, default=10.0, help="소구경 홀 막기 기준(mm)")
-    parser.add_argument("--no-unify", action="store_true", help="동일 곡면 통합 비활성화")
+    parser.add_argument("step_file", nargs="?", help="Optional STEP file to open automatically in GUI")
+    parser.add_argument("--cli", action="store_true", help="Run in headless CLI batch mode")
+    parser.add_argument("-i", "--input", help="Input STEP file path for CLI mode")
+    parser.add_argument("-o", "--output", help="Output STEP file path for CLI mode")
+    parser.add_argument("--views", type=int, default=64, help="Number of Fibonacci sphere viewpoints")
+    parser.add_argument("--grid", type=int, default=160, help="Orthographic ray grid resolution per view")
+    parser.add_argument("--min-visible", type=float, default=0.5, help="Minimum visibility threshold (%%)")
+    parser.add_argument("--bridge-gap", type=float, default=3.5, help="Internal core gap bridging distance (mm)")
+    parser.add_argument("--core-inset", type=float, default=2.0, help="Exterior protection safety inset (mm)")
+    parser.add_argument("--island-gap", type=float, default=3.0, help="Max gap to bridge floating outer parts (mm)")
+    parser.add_argument("--no-core", action="store_true", help="Disable analytic interior core generation")
+    parser.add_argument("--no-island-bridge", action="store_true", help="Disable internal pin bridging for floating parts")
+    parser.add_argument("--remove-holes", action="store_true", help="Enable small outer through-hole plugging")
+    parser.add_argument("--max-hole-dia", type=float, default=10.0, help="Max diameter for small hole plugging (mm)")
+    parser.add_argument("--no-unify", action="store_true", help="Disable UnifySameDomain face merging")
     parser.add_argument("--schema", choices=("AP214", "AP242", "AP203"), default="AP214")
 
     args = parser.parse_args(argv)
@@ -95,7 +95,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.input and args.step_file:
             args.input = args.step_file
         if not args.input:
-            parser.error("CLI 모드에서는 --input 또는 STEP 파일 경로가 필요합니다.")
+            parser.error("CLI mode requires --input or a STEP file path.")
         return _run_cli(args)
 
     from simple_3d_step.gui.app import Simple3DStepApp

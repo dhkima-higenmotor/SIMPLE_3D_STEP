@@ -13,9 +13,9 @@ import numpy as np
 class PartStatus(str, Enum):
     """Classification status of a part in the assembly."""
 
-    UNKNOWN = "미분석"
-    EXTERNAL = "외부(유지)"
-    INTERNAL = "내부(삭제)"
+    UNKNOWN = "Unanalyzed"
+    EXTERNAL = "External (Keep)"
+    INTERNAL = "Internal (Drop)"
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -60,9 +60,9 @@ class PartNode:
     @property
     def effective_status_label(self) -> str:
         if self.user_overridden:
-            return "유지(수동)" if self.keep else "삭제(수동)"
+            return "Keep (Manual)" if self.keep else "Drop (Manual)"
         if self.auto_status == PartStatus.UNKNOWN:
-            return "유지" if self.keep else "삭제"
+            return "Keep" if self.keep else "Drop"
         return self.auto_status.value
 
 
@@ -90,32 +90,32 @@ class AssemblyModel:
 class VisibilityConfig:
     """Parameters controlling 2-Pass Embree ray-casting visibility analysis."""
 
-    num_views: int = 64                 # Fibonacci 구면 시점 수 (빠름:26, 표준:64, 정밀:162)
-    grid_resolution: int = 160          # 시점당 직교 광선 격자 해상도 (R x R)
-    linear_deflection_ratio: float = 0.0025  # 전체 대각선 대비 테셀레이션 편차 비율
-    angular_deflection: float = 0.5     # 테셀레이션 각도 편차 (rad)
-    enable_pass2_verify: bool = True    # 경계/소형 부품 내부→외부 역방향 검증
-    pass2_samples_per_part: int = 48    # Pass 2 부품당 표면 샘플 수
-    pass2_rays_per_sample: int = 32     # Pass 2 샘플당 반구 광선 수
-    min_visible_ratio: float = 0.005    # 최소 가시 비율 임계값 (0.005 = 0.5%)
-    min_part_volume_mm3: float = 0.0    # 이 부피 이하 소형 부품 자동 삭제 (0 = 비활성)
+    num_views: int = 64                 # Fibonacci sphere viewpoints (Fast:26, Standard:64, Fine:162)
+    grid_resolution: int = 160          # Orthographic ray grid resolution per viewpoint (R x R)
+    linear_deflection_ratio: float = 0.0025  # Tessellation linear deflection ratio vs bbox diagonal
+    angular_deflection: float = 0.5     # Tessellation angular deflection (rad)
+    enable_pass2_verify: bool = True    # Reverse inside-out hemisphere verification for borderline/small parts
+    pass2_samples_per_part: int = 48    # Pass 2 surface sample points per part
+    pass2_rays_per_sample: int = 32     # Pass 2 hemisphere rays per sample point
+    min_visible_ratio: float = 0.005    # Minimum exterior visibility threshold (0.005 = 0.5%)
+    min_part_volume_mm3: float = 0.0    # Auto-drop parts below this volume in mm^3 (0 = disabled)
 
 
 @dataclass
 class SimplifyConfig:
     """Parameters controlling 100% exterior-preserving exact B-Rep solidification."""
 
-    fill_internal_core: bool = True     # 외벽 안쪽 해석적 B-Rep 내부 코어 채움 활성화
-    core_bridge_gap_mm: float = 3.5     # 회전부·커버 등 외관 부품 간 내부 브리지 허용 간극 (mm)
-    core_inset_mm: float = 2.0          # 외관 표면 보호 최소 안전 여백 (코어는 외피에서 이 거리 안쪽에만 생성)
-    core_grid_resolution: int = 120     # 내부 공동 탐색용 보조 격자 해상도 (외관 형상에는 미사용)
-    connect_floating_parts: bool = True # 미세 공차로 떠 있는 외관 부품(커넥터/볼트 등) 내부 핀 연결
-    max_island_gap_mm: float = 3.0      # 분리 외관 부품 내부 연결 허용 최대 간격 (mm)
-    remove_small_holes: bool = False    # 소구경 원통형 관통홀 자동 막기 (기본 OFF: 외관 홀 원본 보존)
-    max_hole_diameter: float = 10.0     # 소구경 홀 막기 기준 직경 (mm)
-    unify_same_domain: bool = True      # 동일 평면/곡면 통합 (ShapeUpgrade_UnifySameDomain)
-    keep_largest_only: bool = True      # 연결 불가한 극소 분리체 잔존 시 최대 단일 본체만 유지
-    step_schema: str = "AP214"          # 출력 STEP 스키마 (AP214 / AP242 / AP203)
+    fill_internal_core: bool = True     # Enable exact analytic B-Rep internal core filling
+    core_bridge_gap_mm: float = 3.5     # Bridge gap tolerance between outer shells/covers/rotors (mm)
+    core_inset_mm: float = 2.0          # Minimum inward safety inset protecting exterior B-Rep surfaces (mm)
+    core_grid_resolution: int = 120     # Auxiliary voxel grid resolution for cavity probing (never exported)
+    connect_floating_parts: bool = True # Connect tolerance-gapped exterior parts via hidden internal pins
+    max_island_gap_mm: float = 3.0      # Maximum gap for internal pin bridges (mm)
+    remove_small_holes: bool = False    # Plug small cylindrical through-holes (OFF by default to preserve exterior)
+    max_hole_diameter: float = 10.0     # Maximum hole diameter when remove_small_holes is enabled (mm)
+    unify_same_domain: bool = True      # Merge coplanar/co-surface faces (ShapeUpgrade_UnifySameDomain)
+    keep_largest_only: bool = True      # Keep only the largest solid if tiny unconnectable islands remain
+    step_schema: str = "AP214"          # Output STEP schema (AP214 / AP242 / AP203)
 
 
 @dataclass

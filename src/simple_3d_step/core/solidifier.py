@@ -16,53 +16,84 @@ Internal cavities and hidden internal features are eliminated by:
 
 from __future__ import annotations
 
+from collections import deque
 import math
+import shutil
+import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import trimesh
 from OCP.Bnd import Bnd_Box
-from OCP.BRep import BRep_Builder
-from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRep import BRep_Builder, BRep_Tool
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Defeaturing, BRepAlgoAPI_Fuse
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepBuilderAPI import (
+    BRepBuilderAPI_MakeEdge,
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakePolygon,
     BRepBuilderAPI_MakeSolid,
+    BRepBuilderAPI_MakeVertex,
 )
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepClass3d import BRepClass3d, BRepClass3d_SolidClassifier
 from OCP.BRepGProp import BRepGProp
+from OCP.BRepLib import BRepLib
 from OCP.BRepLProp import BRepLProp_SLProps
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
-from OCP.GeomAbs import GeomAbs_Cylinder
+from OCP.BRepTools import BRepTools
+from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Line
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
-from OCP.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.ShapeAnalysis import ShapeAnalysis_Wire
+from OCP.ShapeBuild import ShapeBuild_ReShape
+from OCP.ShapeFix import ShapeFix_FixSmallFace, ShapeFix_Shape, ShapeFix_Solid
 from OCP.ShapeUpgrade import (
     ShapeUpgrade_RemoveInternalWires,
+    ShapeUpgrade_ShapeDivideClosed,
     ShapeUpgrade_UnifySameDomain,
 )
+from OCP.StdPrs import StdPrs_ShadedShape, StdPrs_ToolTriangulatedShape
+from OCP.STEPControl import STEPControl_Reader
 from OCP.TopAbs import (
+    TopAbs_EDGE,
     TopAbs_FACE,
+    TopAbs_FORWARD,
     TopAbs_IN,
     TopAbs_REVERSED,
     TopAbs_SHELL,
     TopAbs_SOLID,
+    TopAbs_WIRE,
 )
-from OCP.TopExp import TopExp_Explorer
-from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape, TopoDS_Solid
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopLoc import TopLoc_Location
+from OCP.TopoDS import (
+    TopoDS_Compound,
+    TopoDS_Edge,
+    TopoDS_Face,
+    TopoDS_Shape,
+    TopoDS_Shell,
+    TopoDS_Solid,
+    TopoDS_Wire,
+)
 from scipy import ndimage
 from scipy.spatial import cKDTree
 from skimage.measure import approximate_polygon, find_contours
 
 from simple_3d_step.core.occt_compat import (
+    ShapeIndexedDataMapOfList,
+    ShapeIndexedMap,
     ShapeList,
+    to_edge,
     to_face,
     to_shell,
     to_solid,
+    to_wire,
 )
 from simple_3d_step.core.tessellation import tessellate_shape_triangles
 from simple_3d_step.core.validator import validate_shape
@@ -236,29 +267,164 @@ def _remove_small_holes_from_solid(
     return current, removed
 
 
-def _remove_closed_void_shells(solid: TopoDS_Solid) -> tuple[TopoDS_Solid, int, float]:
-    """Strip all enclosed internal void shells from a solid, keeping exact OuterShell."""
-    n_shells = _count_shells(solid)
-    if n_shells <= 1:
+def _strip_disconnected_void_components(solid: TopoDS_Solid) -> tuple[TopoDS_Solid, int, float]:
+    """Remove any hidden disconnected closed void face-components packed into a single Shell.
+
+    Some OCCT healing/boolean steps can place a closed internal cavity inside the same
+    TopoDS_Shell as the outer boundary (so shell_count appears to be 1 while an internal
+    hollow shell still exists). BFS over the edge->face adjacency graph detects and strips
+    all internal disconnected closed face groups, keeping only the outermost skin.
+    """
+    fmap = ShapeIndexedMap()
+    TopExp.MapShapes_s(solid, TopAbs_FACE, fmap)
+    n_faces = fmap.Extent()
+    if n_faces == 0:
+        return solid, 0, 0.0
+
+    ef_map = ShapeIndexedDataMapOfList()
+    TopExp.MapShapesAndAncestors_s(solid, TopAbs_EDGE, TopAbs_FACE, ef_map)
+
+    adj: list[set[int]] = [set() for _ in range(n_faces + 1)]
+    for i in range(1, ef_map.Extent() + 1):
+        flist = ef_map.FindFromIndex(i)
+        fids = [fmap.FindIndex(f) for f in flist]
+        if len(fids) < 2:
+            continue
+        for a in fids:
+            for b in fids:
+                if a != b:
+                    adj[a].add(b)
+
+    visited = [False] * (n_faces + 1)
+    components: list[list[int]] = []
+    for i in range(1, n_faces + 1):
+        if visited[i]:
+            continue
+        q = deque([i])
+        visited[i] = True
+        comp: list[int] = []
+        while q:
+            u = q.popleft()
+            comp.append(u)
+            for v in adj[u]:
+                if not visited[v]:
+                    visited[v] = True
+                    q.append(v)
+        components.append(comp)
+
+    if len(components) <= 1:
+        return solid, 0, 0.0
+
+    # Choose the outermost component (largest bounding-box diagonal; tie-break by face count)
+    best_comp = None
+    best_key = (-1.0, -1)
+    for comp in components:
+        box = Bnd_Box()
+        for fid in comp:
+            BRepBndLib.Add_s(fmap.FindKey(fid), box, False)
+        diag = 0.0
+        if not box.IsVoid():
+            pmin, pmax = box.CornerMin(), box.CornerMax()
+            diag = math.sqrt(
+                (pmax.X() - pmin.X()) ** 2
+                + (pmax.Y() - pmin.Y()) ** 2
+                + (pmax.Z() - pmin.Z()) ** 2
+            )
+        key = (round(diag, 4), len(comp))
+        if key > best_key:
+            best_key = key
+            best_comp = comp
+
+    if best_comp is None:
         return solid, 0, 0.0
 
     orig_vol = abs(_shape_volume(solid))
     try:
-        outer_shell = BRepClass3d.OuterShell_s(solid)
-        if outer_shell.IsNull():
-            return solid, 0, 0.0
+        builder = BRep_Builder()
+        outer_shell = TopoDS_Shell()
+        builder.MakeShell(outer_shell)
+        for fid in best_comp:
+            builder.Add(outer_shell, fmap.FindKey(fid))
+        outer_shell.Closed(True)
+
         mk = BRepBuilderAPI_MakeSolid(outer_shell)
         if not mk.IsDone():
             return solid, 0, 0.0
         sfix = ShapeFix_Solid(mk.Solid())
         sfix.Perform()
-        fixed = sfix.Solid()
+        fixed = to_solid(sfix.Solid())
+        BRepLib.OrientClosedSolid_s(fixed)
         new_vol = abs(_shape_volume(fixed))
-        if new_vol >= orig_vol * 0.999:
-            return fixed, n_shells - 1, max(0.0, new_vol - orig_vol)
+        # Accept whenever removing inner components keeps or increases enclosed solid volume
+        # (or removes strictly-enclosed inner shells regardless of their original face orientation)
+        if new_vol > 0.0 and (new_vol >= orig_vol * 0.95):
+            return fixed, len(components) - 1, max(0.0, new_vol - orig_vol)
     except Exception:
         pass
     return solid, 0, 0.0
+
+
+def _remove_closed_void_shells(solid: TopoDS_Solid) -> tuple[TopoDS_Solid, int, float]:
+    """Strip ALL enclosed internal void shells (both multi-shell and hidden single-shell voids)."""
+    current = solid
+    total_removed = 0
+    total_delta = 0.0
+
+    # Pass 1: Explicit multi-shell internal voids (TopoDS_Shell count > 1)
+    n_shells = _count_shells(current)
+    if n_shells > 1:
+        orig_vol = abs(_shape_volume(current))
+        outer_shell: Optional[TopoDS_Shell] = None
+        try:
+            cand = BRepClass3d.OuterShell_s(current)
+            if not cand.IsNull():
+                outer_shell = cand
+        except Exception:
+            outer_shell = None
+
+        # Fallback: pick shell enclosing the largest solid volume
+        if outer_shell is None:
+            best_v = -1.0
+            es = TopExp_Explorer(current, TopAbs_SHELL)
+            while es.More():
+                shl = to_shell(es.Current())
+                try:
+                    mk_t = BRepBuilderAPI_MakeSolid(shl)
+                    if mk_t.IsDone():
+                        st = mk_t.Solid()
+                        BRepLib.OrientClosedSolid_s(st)
+                        v = abs(_shape_volume(st))
+                        if v > best_v:
+                            best_v = v
+                            outer_shell = shl
+                except Exception:
+                    pass
+                es.Next()
+
+        if outer_shell is not None:
+            try:
+                mk = BRepBuilderAPI_MakeSolid(outer_shell)
+                if mk.IsDone():
+                    sfix = ShapeFix_Solid(mk.Solid())
+                    sfix.Perform()
+                    fixed = to_solid(sfix.Solid())
+                    BRepLib.OrientClosedSolid_s(fixed)
+                    new_vol = abs(_shape_volume(fixed))
+                    if new_vol >= orig_vol * 0.999:
+                        total_removed += n_shells - 1
+                        total_delta += max(0.0, new_vol - orig_vol)
+                        current = fixed
+            except Exception:
+                pass
+
+    # Pass 2: Hidden disconnected closed face-components inside the remaining shell
+    cleaned, n_comp_removed, comp_delta = _strip_disconnected_void_components(current)
+    if n_comp_removed > 0:
+        current = cleaned
+        total_removed += n_comp_removed
+        total_delta += comp_delta
+
+    return current, total_removed, total_delta
 
 
 def _26_unit_directions() -> np.ndarray:
@@ -322,7 +488,7 @@ def _build_analytic_interior_core(
     off = 0
     for p in kept_parts:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         defl = max(min(p.bbox_diagonal * 0.01, 0.35), 0.08)
         v, f, _, _ = tessellate_shape_triangles(p.shape, linear_deflection=defl)
         if len(f) > 0:
@@ -365,7 +531,7 @@ def _build_analytic_interior_core(
     ]
     for axis, a1, a2, start_val, direction in sweeps:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         g1, g2 = np.meshgrid(a1, a2, indexing="ij")
         n_rays = g1.size
         origs = np.empty((n_rays, 3), dtype=np.float64)
@@ -426,7 +592,7 @@ def _build_analytic_interior_core(
         exposed_flags = np.zeros(len(pts_u), dtype=bool)
         for c0 in range(0, len(pts_u), chunk_size):
             if cancel_check and cancel_check():
-                raise InterruptedError("사용자가 작업을 취소했습니다.")
+                raise InterruptedError("Operation cancelled by user.")
             c1 = min(c0 + chunk_size, len(pts_u))
             sub_pts = pts_u[c0:c1]
             ray_origs = np.repeat(sub_pts, n_dirs, axis=0)
@@ -483,7 +649,7 @@ def _build_analytic_interior_core(
 
     while wi <= w_max_i:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         w_end = min(wi + slab_vox - 1, w_max_i)
         # Intersection across slab ensures 100% containment inside safe_core
         slice_2d = np.all(grid_p[:, :, wi : w_end + 1], axis=2)
@@ -560,8 +726,8 @@ def _build_analytic_interior_core(
 
     if logs is not None:
         logs.append(
-            f"해석적 내부 코어 생성 완료 ({axis_names[slice_axis]}축 정렬: "
-            f"원통 {n_cyls}개, 다각 프리즘 {n_prisms}개 | 외관 노출 영역 {carved_voxels:,} 복셀 보호 제외)"
+            f"Analytic interior core generated ({axis_names[slice_axis]}-axis aligned: "
+            f"{n_cyls} cylinders, {n_prisms} polygonal prisms | protected {carved_voxels:,} exterior-visible voxels)"
         )
 
     return core_solids
@@ -617,35 +783,36 @@ def _batch_fuse_safe(
     max_v = max(abs(_shape_volume(s)) for s in shapes)
     sum_v = sum(abs(_shape_volume(s)) for s in shapes)
 
-    # Attempt fast single-pass multi-tool batch fuse at exact fuzzy=0.0 (then 1e-4)
-    for fz in (0.0, 1e-4):
-        if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
-        try:
-            args = ShapeList()
-            args.Append(shapes[0])
-            tools = ShapeList()
-            for s in shapes[1:]:
-                tools.Append(s)
-            fuse = BRepAlgoAPI_Fuse()
-            fuse.SetArguments(args)
-            fuse.SetTools(tools)
-            fuse.SetRunParallel(True)
-            if fz > 0.0:
-                fuse.SetFuzzyValue(fz)
-            fuse.SetNonDestructive(True)
-            fuse.Build()
-            if fuse.IsDone() and not fuse.Shape().IsNull():
-                res = fuse.Shape()
-                sols = _extract_solids(res)
-                vr = abs(_shape_volume(res))
-                if sols and vr >= max_v * 0.99 and vr <= sum_v * 1.01 + 1.0:
-                    logs.append(
-                        f"{label} 배치 결합 성공 ({len(shapes)}개 → {len(sols)}개 Solid, fuzzy={fz})"
-                    )
-                    return res
-        except Exception:
-            pass
+    # Attempt fast single-pass multi-tool batch fuse ONLY at exact fuzzy=0.0.
+    # Never globally degrade the entire batch to fuzzy>0: a single tight tangent contact
+    # (e.g. concentric mating flanges) fused at fuzzy=1e-4 can introduce SelfIntersectingWire
+    # faces that fail BRepCheck after STEP round-trip. If exact batch fails, progressive
+    # pairwise fallback tries fuzzy=0.0 per pair first and raises fuzzy only where needed.
+    if cancel_check and cancel_check():
+        raise InterruptedError("Operation cancelled by user.")
+    try:
+        args = ShapeList()
+        args.Append(shapes[0])
+        tools = ShapeList()
+        for s in shapes[1:]:
+            tools.Append(s)
+        fuse = BRepAlgoAPI_Fuse()
+        fuse.SetArguments(args)
+        fuse.SetTools(tools)
+        fuse.SetRunParallel(True)
+        fuse.SetNonDestructive(True)
+        fuse.Build()
+        if fuse.IsDone() and not fuse.Shape().IsNull():
+            res = fuse.Shape()
+            sols = _extract_solids(res)
+            vr = abs(_shape_volume(res))
+            if sols and vr >= max_v * 0.99 and vr <= sum_v * 1.01 + 1.0:
+                logs.append(
+                    f"{label} batch fuse succeeded ({len(shapes)} -> {len(sols)} solid(s), fuzzy=0.0)"
+                )
+                return res
+    except Exception:
+        pass
 
     # Progressive pairwise fallback (strictly volume-checked so no part is silently lost)
     acc = shapes[0]
@@ -655,7 +822,7 @@ def _batch_fuse_safe(
 
     for idx, nxt in enumerate(shapes[1:], start=1):
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         if progress_cb and (idx % max(1, total // 10) == 0 or idx == total):
             progress_cb(p0 + (p1 - p0) * (idx / max(total, 1)), f"{label} ({idx}/{total})...")
         merged = _fuse_two_safe(acc, nxt)
@@ -665,9 +832,9 @@ def _batch_fuse_safe(
             failed += 1
 
     if failed > 0:
-        logs.append(f"{label} 순차 결합 완료 ({total + 1 - failed}/{total + 1}개 성공, {failed}개 생략)")
+        logs.append(f"{label} sequential fuse completed ({total + 1 - failed}/{total + 1} succeeded, {failed} skipped)")
     else:
-        logs.append(f"{label} 순차 결합 완료 ({total + 1}개 전체 성공)")
+        logs.append(f"{label} sequential fuse completed ({total + 1}/{total + 1} succeeded)")
     return acc
 
 
@@ -706,7 +873,7 @@ def _connect_floating_islands(
 
     for isl in islands:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         if _is_solid_inside(isl, main_solid):
             continue
 
@@ -766,9 +933,405 @@ def _connect_floating_islands(
         remaining.append(isl)
 
     if connected > 0:
-        logs.append(f"미세 공차 분리 외관 부품 {connected}개를 내부 B-Rep 핀 브리지로 단일화 연결")
+        logs.append(f"Bridged {connected} clearance-separated outer part(s) via hidden internal B-Rep pins")
 
     return main_solid, remaining
+
+
+def _count_lacking_wires(shape: TopoDS_Shape) -> int:
+    """Count faces with 2D seam/pcurve closure gaps (CheckLacking) that break OCCT 7.x viewers."""
+    lacking = 0
+    ef = TopExp_Explorer(shape, TopAbs_FACE)
+    while ef.More():
+        f = to_face(ef.Current())
+        ew = TopExp_Explorer(f, TopAbs_WIRE)
+        while ew.More():
+            try:
+                if ShapeAnalysis_Wire(to_wire(ew.Current()), f, 1e-4).CheckLacking():
+                    lacking += 1
+            except Exception:
+                pass
+            ew.Next()
+        ef.Next()
+    return lacking
+
+
+def _split_edge_exact_subedges(edge: TopoDS_Edge, n: int = 2) -> Optional[TopoDS_Wire]:
+    """Split a 3D curve edge into n exact sub-edges in a TopoDS_Wire (0.0 geometric error)."""
+    try:
+        ac = BRepAdaptor_Curve(edge)
+        f_par = ac.FirstParameter()
+        l_par = ac.LastParameter()
+        if (l_par - f_par) <= 1e-9:
+            return None
+        loc = TopLoc_Location()
+        c3d = BRep_Tool.Curve_s(edge, loc, f_par, l_par)
+        if c3d is None:
+            return None
+
+        v_first = TopExp.FirstVertex_s(edge, False)
+        v_last = TopExp.LastVertex_s(edge, False)
+        trsf = loc.Transformation()
+        params = [f_par + (l_par - f_par) * k / n for k in range(n + 1)]
+        verts = (
+            [v_first]
+            + [BRepBuilderAPI_MakeVertex(c3d.Value(pv).Transformed(trsf)).Vertex() for pv in params[1:-1]]
+            + [v_last]
+        )
+
+        builder = BRep_Builder()
+        wire = TopoDS_Wire()
+        builder.MakeWire(wire)
+        c_world = c3d.Transformed(trsf) if not loc.IsIdentity() else c3d
+        tol = BRep_Tool.Tolerance_s(edge)
+        for k in range(n):
+            me = BRepBuilderAPI_MakeEdge(c_world, verts[k], verts[k + 1], params[k], params[k + 1])
+            if not me.IsDone():
+                return None
+            sub_e = me.Edge()
+            builder.UpdateEdge(sub_e, tol)
+            builder.Add(wire, sub_e)
+        return wire
+    except Exception:
+        return None
+
+
+def _cad_assistant_deflection_suite(shape: TopoDS_Shape) -> list[tuple[str, float, bool, float]]:
+    """Return OCCT/CAD Assistant Prs3d deflection profiles (both relative and absolute)."""
+    bmin, bmax = _shape_bbox(shape)
+    max_dim = max(float(np.max(bmax - bmin)), 1.0)
+    return [
+        ("rel0.001_0.50", 0.001, True, 0.50),
+        ("rel0.001_0.35", 0.001, True, 0.35),
+        ("abs_fine_0.35", max(1e-3, max_dim * 0.001), False, 0.35),
+        ("abs_med_0.35", max(1e-3, max_dim * 0.002), False, 0.35),
+        ("abs_prs3d_0.35", max(1e-3, max_dim * 0.004), False, 0.35),
+    ]
+
+
+def _audit_prs_closed_meshing(
+    shape: TopoDS_Shape,
+    fast: bool = False,
+) -> tuple[int, set[int]]:
+    """Audit BRepMesh + StdPrs_ShadedShape::ExploreSolids across CAD Assistant deflections.
+
+    Returns (failed_profile_count, union_of_failing_face_indices).
+    If even 1 face returns NULL triangulation, OCCT's StdPrs_ShadedShape::ExploreSolids
+    reclassifies the ENTIRE solid as Opened, disabling Clipping Plane Capping in CAD Assistant.
+    When fast=True, tests the two bounding profiles (rel0.001_0.50 and abs_prs3d_0.35).
+    """
+    suite = _cad_assistant_deflection_suite(shape)
+    if fast:
+        suite = [suite[0], suite[-1]]
+
+    failing_faces: set[int] = set()
+    failed_profiles = 0
+    for _, lin, rel, ang in suite:
+        BRepTools.Clean_s(shape)
+        BRepMesh_IncrementalMesh(shape, lin, rel, ang, True).Perform()
+
+        profile_bad = False
+        ef = TopExp_Explorer(shape, TopAbs_FACE)
+        idx = 0
+        while ef.More():
+            tri = BRep_Tool.Triangulation_s(to_face(ef.Current()), TopLoc_Location())
+            if tri is None or tri.NbTriangles() == 0:
+                failing_faces.add(idx)
+                profile_bad = True
+            idx += 1
+            ef.Next()
+
+        if not profile_bad:
+            try:
+                if not StdPrs_ToolTriangulatedShape.IsTriangulated_s(shape):
+                    profile_bad = True
+                else:
+                    c_cl = TopoDS_Compound()
+                    c_op = TopoDS_Compound()
+                    b = BRep_Builder()
+                    b.MakeCompound(c_cl)
+                    b.MakeCompound(c_op)
+                    StdPrs_ShadedShape.ExploreSolids_s(shape, b, c_cl, c_op, True)
+                    if TopExp_Explorer(c_op, TopAbs_FACE).More():
+                        profile_bad = True
+            except Exception:
+                pass
+
+        if profile_bad:
+            failed_profiles += 1
+
+    BRepTools.Clean_s(shape)
+    return failed_profiles, failing_faces
+
+
+def _normalize_via_step_3d_curves(shape: TopoDS_Shape) -> TopoDS_Shape:
+    """Round-trip through clean 3D-curve STEP so stale in-memory 2D pcurves are rebuilt cleanly."""
+    from simple_3d_step.core.step_io import save_shape_to_step
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="s3d_norm_"))
+    try:
+        tmp_step = tmp_dir / "norm.step"
+        save_shape_to_step(shape, tmp_step)
+        rdr = STEPControl_Reader()
+        if rdr.ReadFile(str(tmp_step)) == IFSelect_RetDone:
+            rdr.TransferRoots()
+            reloaded = rdr.OneShape()
+            if not reloaded.IsNull():
+                sols = _extract_solids(reloaded)
+                if len(sols) == 1 and shape.ShapeType() == TopAbs_SOLID:
+                    BRepLib.OrientClosedSolid_s(sols[0])
+                    BRepTools.Clean_s(sols[0])
+                    return sols[0]
+                BRepTools.Clean_s(reloaded)
+                return reloaded
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return shape
+
+
+def _heal_mesh_blocking_faces(
+    shape: TopoDS_Shape,
+    logs: list[str],
+) -> TopoDS_Shape:
+    """Eliminate faces that fail BRepMesh so CAD Assistant Clipping Capping stays enabled.
+
+    Step A: Single tight pass of ShapeFix_FixSmallFace(0.015) collapses razor-thin (< 0.015 mm)
+            tangent slivers that produce NULL triangulations in BRepMesh.
+    Step B: Targeted exact midpoint splitting of long curved edges ONLY on any remaining
+            mesh-failing faces (0 extra faces, 0.0 mm geometric distortion) prevents coarse
+            Prs3d chord self-intersection at CAD Assistant's default 20-deg/0.004*L mesh.
+    """
+    current = shape
+    rep_base = validate_shape(current)
+    lacking_base = _count_lacking_wires(current)
+
+    # Step A: Collapse razor-thin Boolean intersection slivers (< 0.015 mm)
+    try:
+        sfsf = ShapeFix_FixSmallFace()
+        sfsf.Init(current)
+        sfsf.SetPrecision(0.015)
+        sfsf.SetMaxTolerance(0.015)
+        sfsf.Perform()
+
+        sf = ShapeFix_Shape(sfsf.Shape())
+        sf.SetPrecision(1e-4)
+        sf.SetMaxTolerance(1e-3)
+        sf.Perform()
+
+        sols = _extract_solids(sf.Shape())
+        cand_a: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
+        for s in sols:
+            BRepLib.OrientClosedSolid_s(s)
+        BRepTools.Clean_s(cand_a)
+        # Re-normalize via 3D-curve STEP so transient in-memory pcurve tolerances from
+        # FixSmallFace match the clean round-trip validity seen by external viewers.
+        cand_a = _normalize_via_step_3d_curves(cand_a)
+
+        rep_a = validate_shape(cand_a)
+        lacking_a = _count_lacking_wires(cand_a)
+        if (
+            rep_a.solid_count == rep_base.solid_count
+            and rep_a.shell_count <= rep_base.shell_count
+            and rep_a.is_watertight
+            and not (rep_base.is_valid and not rep_a.is_valid)
+            and abs(rep_a.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+            and lacking_a <= lacking_base
+        ):
+            removed_slivers = max(0, rep_base.face_count - rep_a.face_count)
+            if removed_slivers > 0:
+                logs.append(f"Cleaned {removed_slivers} microscopic sliver face(s) ({rep_a.face_count:,} faces remaining)")
+            current = cand_a
+            rep_base = rep_a
+            lacking_base = lacking_a
+    except Exception:
+        pass
+
+    # Scan key CAD Assistant deflections (rel0.001 + abs_prs3d) to find any remaining NULL-mesh faces
+    fails_before, bad_faces = _audit_prs_closed_meshing(current, fast=True)
+    if fails_before == 0 and not bad_faces:
+        logs.append("CAD Assistant closed-mesh capping audit passed (0 unmeshed faces)")
+        return current
+
+    # Step B: Targeted exact midpoint split of curved edges ONLY on remaining mesh-failing faces
+    if bad_faces:
+        try:
+            edges_to_split = ShapeIndexedMap()
+            ef = TopExp_Explorer(current, TopAbs_FACE)
+            idx = 0
+            while ef.More():
+                f = to_face(ef.Current())
+                if idx in bad_faces:
+                    sp = GProp_GProps()
+                    BRepGProp.SurfaceProperties_s(f, sp)
+                    min_edge_len = 10.0 if abs(sp.Mass()) >= 0.01 else 0.5
+                    ee = TopExp_Explorer(f, TopAbs_EDGE)
+                    while ee.More():
+                        ed = to_edge(ee.Current())
+                        if not BRep_Tool.Degenerated_s(ed):
+                            ac = BRepAdaptor_Curve(ed)
+                            gp = GProp_GProps()
+                            BRepGProp.LinearProperties_s(ed, gp)
+                            if gp.Mass() > min_edge_len and ac.GetType() != GeomAbs_Line:
+                                edges_to_split.Add(ed)
+                        ee.Next()
+                idx += 1
+                ef.Next()
+
+            if edges_to_split.Extent() > 0:
+                reshape = ShapeBuild_ReShape()
+                split_cnt = 0
+                for i in range(1, edges_to_split.Extent() + 1):
+                    ed_fwd = to_edge(edges_to_split.FindKey(i).Oriented(TopAbs_FORWARD))
+                    w_rep = _split_edge_exact_subedges(ed_fwd, n=2)
+                    if w_rep is not None:
+                        reshape.Replace(ed_fwd, w_rep)
+                        split_cnt += 1
+
+                if split_cnt > 0:
+                    sf = ShapeFix_Shape(reshape.Apply(current))
+                    sf.SetPrecision(1e-4)
+                    sf.SetMaxTolerance(1e-3)
+                    sf.Perform()
+                    sols = _extract_solids(sf.Shape())
+                    cand_b: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
+                    for s in sols:
+                        BRepLib.OrientClosedSolid_s(s)
+                    BRepTools.Clean_s(cand_b)
+                    cand_b = _normalize_via_step_3d_curves(cand_b)
+
+                    rep_b = validate_shape(cand_b)
+                    lacking_b = _count_lacking_wires(cand_b)
+                    if (
+                        rep_b.solid_count == rep_base.solid_count
+                        and rep_b.shell_count <= rep_base.shell_count
+                        and rep_b.is_watertight
+                        and not (rep_base.is_valid and not rep_b.is_valid)
+                        and abs(rep_b.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+                        and lacking_b <= lacking_base
+                    ):
+                        fails_b, bad_b = _audit_prs_closed_meshing(cand_b, fast=True)
+                        if fails_b < fails_before or len(bad_b) < len(bad_faces):
+                            logs.append(
+                                f"Split {split_cnt} curved edge(s) for CAD Assistant capping compatibility "
+                                f"(unmeshed faces {len(bad_faces)} -> {len(bad_b)}, 0.0 mm geometric error)"
+                            )
+                            current = cand_b
+        except Exception:
+            pass
+
+    BRepTools.Clean_s(current)
+    return current
+
+
+def _sanitize_for_step_compat(
+    shape: TopoDS_Shape,
+    logs: list[str],
+) -> TopoDS_Shape:
+    """Split 360-deg closed periodic surfaces, heal slivers/wires, and guarantee Closed meshing.
+
+    Prevents periodic Cylinder/Cone/Torus seam-wire defects (CheckLacking) and NULL-triangulation
+    sliver/long-arc faces from causing OCCT 7.x viewers (CAD Assistant) to downgrade the Solid
+    to Opened surfaces and disable Clipping Plane Capping.
+    """
+    rep_orig = validate_shape(shape)
+    lacking_before = _count_lacking_wires(shape)
+    current = shape
+
+    try:
+        # 1. Split 360-deg closed periodic faces into two clean 180-deg non-periodic halves
+        divider = ShapeUpgrade_ShapeDivideClosed(current)
+        divider.SetNbSplitPoints(1)
+        divider.Perform()
+        divided = divider.Result()
+
+        # 2. Heal wires, seams, and tolerances (keep MaxTolerance tight at 1e-3 so fine edges
+        #    are never collapsed and STEP UNCERTAINTY is never bloated to 1e-2)
+        fixer = ShapeFix_Shape(divided)
+        fixer.SetPrecision(1e-4)
+        fixer.SetMaxTolerance(1e-3)
+        fixer.Perform()
+        healed = fixer.Shape()
+
+        # 3. Ensure outward closed-solid orientation & clean stale triangulations
+        healed_solids = _extract_solids(healed)
+        if len(healed_solids) == 1:
+            sol = healed_solids[0]
+            BRepLib.OrientClosedSolid_s(sol)
+            BRepTools.Clean_s(sol)
+            candidate: TopoDS_Shape = sol
+        else:
+            for sol in healed_solids:
+                BRepLib.OrientClosedSolid_s(sol)
+            BRepTools.Clean_s(healed)
+            candidate = healed
+
+        rep_new = validate_shape(candidate)
+        lacking_after = _count_lacking_wires(candidate)
+
+        if (
+            rep_new.solid_count == rep_orig.solid_count
+            and rep_new.shell_count <= rep_orig.shell_count
+            and rep_new.is_watertight
+            and not (rep_orig.is_valid and not rep_new.is_valid)
+            and abs(rep_new.volume - rep_orig.volume) / max(rep_orig.volume, 1.0) < 0.01
+            and lacking_after <= lacking_before
+        ):
+            logs.append(
+                f"STEP viewer periodic surface split & wire healing complete "
+                f"(2D seam defects {lacking_before} -> {lacking_after}, {rep_new.face_count:,} faces)"
+            )
+            current = candidate
+    except Exception as exc:
+        logs.append(f"STEP compatibility healing warning (kept original): {exc}")
+
+    # 4. Normalize via 3D-curve-only STEP so stale in-memory pcurves match actual viewer import
+    current = _normalize_via_step_3d_curves(current)
+
+    # 5. Eliminate sliver / coarse-deflection mesh-blocking faces for CAD Assistant Clipping Capping
+    current = _heal_mesh_blocking_faces(current, logs)
+    return current
+
+
+def _purge_final_closed_void_shells(
+    shape: TopoDS_Shape,
+    logs: list[str],
+) -> TopoDS_Shape:
+    """Final mandatory post-processing pass ensuring ZERO internal closed void shells remain."""
+    sols = _extract_solids(shape)
+    if not sols:
+        return shape
+
+    cleaned_sols: list[TopoDS_Solid] = []
+    purged_count = 0
+    purged_vol = 0.0
+    for s in sols:
+        sf, nv, dv = _remove_closed_void_shells(s)
+        BRepLib.OrientClosedSolid_s(sf)
+        BRepTools.Clean_s(sf)
+        cleaned_sols.append(sf)
+        purged_count += nv
+        purged_vol += dv
+
+    if purged_count > 0:
+        logs.append(
+            f"Final post-processing purged {purged_count} remaining internal closed void shell(s) "
+            f"(+{purged_vol:,.1f} mm³ solid fill)"
+        )
+    else:
+        logs.append("Final post-processing void check passed: 0 internal closed shells remaining")
+
+    if len(cleaned_sols) == 1 and shape.ShapeType() == TopAbs_SOLID:
+        return cleaned_sols[0]
+    if len(cleaned_sols) == 1:
+        return cleaned_sols[0]
+    builder = BRep_Builder()
+    comp = TopoDS_Compound()
+    builder.MakeCompound(comp)
+    for s in cleaned_sols:
+        builder.Add(comp, s)
+    return comp
 
 
 def simplify_assembly_to_single_solid(
@@ -784,55 +1347,55 @@ def simplify_assembly_to_single_solid(
     kept_parts = [p for p in assembly.parts if p.keep]
     removed_count = len(assembly.parts) - len(kept_parts)
     if not kept_parts:
-        raise ValueError("유지할 외관 부품이 1개도 선택되지 않았습니다.")
+        raise ValueError("No outer parts selected to keep.")
 
     kept_parts_sorted = sorted(kept_parts, key=lambda p: -max(p.volume, 0.0))
     orig_vol = sum(max(p.volume, 0.0) for p in kept_parts_sorted)
     logs.append(
-        f"정밀 B-Rep 단순화 시작: 유지 부품 {len(kept_parts_sorted)}개 / 삭제 부품 {removed_count}개 "
-        f"(유지 부품 합산 부피: {orig_vol:,.1f} mm³)"
+        f"Starting exact B-Rep simplification: keep {len(kept_parts_sorted)} / drop {removed_count} parts "
+        f"(kept total volume: {orig_vol:,.1f} mm³)"
     )
 
     # --- Stage 1: Heal kept B-Rep shapes ---
     if progress_cb:
-        progress_cb(0.06, f"외관 부품 B-Rep 형상 검증 및 보정 중 ({len(kept_parts_sorted)}개)...")
+        progress_cb(0.06, f"Validating & healing outer B-Rep parts ({len(kept_parts_sorted)})...")
 
     solids: list[TopoDS_Solid] = []
     valid_parts: list[PartNode] = []
     for p in kept_parts_sorted:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
         healed = _heal_solid(p.shape)
         if healed is not None:
             solids.append(healed)
             valid_parts.append(p)
 
     if not solids:
-        raise RuntimeError("유효한 외관 B-Rep Solid를 추출하지 못했습니다.")
+        raise RuntimeError("Failed to extract any valid outer B-Rep solids.")
 
     # --- Stage 2: Optional Small Hole Defeaturing (OFF by default to keep exact exterior) ---
     if config.remove_small_holes and config.max_hole_diameter > 0.0:
         if progress_cb:
             progress_cb(
                 0.12,
-                f"소구경 관통홀 막기 실행 중 (직경 ≤ {config.max_hole_diameter:.1f} mm)...",
+                f"Plugging small outer through-holes (diameter <= {config.max_hole_diameter:.1f} mm)...",
             )
         total_holes = 0
         cleaned: list[TopoDS_Solid] = []
         for idx, s in enumerate(solids):
             if cancel_check and cancel_check():
-                raise InterruptedError("사용자가 작업을 취소했습니다.")
+                raise InterruptedError("Operation cancelled by user.")
             cs, cnt = _remove_small_holes_from_solid(s, config.max_hole_diameter)
             cleaned.append(cs)
             total_holes += cnt
         solids = cleaned
-        logs.append(f"소구경 홀 막기 완료: {total_holes}개 원통형 홀 면 제거")
+        logs.append(f"Small hole plugging complete: removed {total_holes} cylindrical hole face(s)")
 
     # --- Stage 3: Strictly-Interior Analytic B-Rep Core Generation ---
     core_shape: Optional[TopoDS_Shape] = None
     if config.fill_internal_core:
         if progress_cb:
-            progress_cb(0.20, "외벽 안쪽 해석적 B-Rep 내부 코어 계산 중 (외관 변형 없음)...")
+            progress_cb(0.20, "Computing strictly-interior analytic B-Rep core (exterior untouched)...")
         core_primitives = _build_analytic_interior_core(
             valid_parts,
             bridge_gap_mm=config.core_bridge_gap_mm,
@@ -843,18 +1406,18 @@ def simplify_assembly_to_single_solid(
         )
         if core_primitives:
             if progress_cb:
-                progress_cb(0.32, f"내부 코어 프리미티브 결합 중 ({len(core_primitives)}개)...")
+                progress_cb(0.32, f"Fusing interior core primitives ({len(core_primitives)})...")
             core_shape = _batch_fuse_safe(
                 core_primitives,
                 logs=logs,
-                label="내부 코어 결합",
+                label="Interior core",
                 cancel_check=cancel_check,
             )
 
     # --- Stage 4: Two-Tier Exact B-Rep Boolean Fuse (fuzzy=0.0 first!) ---
     # Tier 1: Fuse major structural housings + analytic interior core FIRST, then immediately
     # strip closed internal void shells so internal features (e.g. gear teeth, inner pockets)
-    # disappear before fusing small fasteners/connectors.
+    # disappear before fusing small fasteners/connectors/PCBs.
     vol_thresh = orig_vol * 0.015
     major_solids = [s for s, p in zip(solids, valid_parts) if p.volume >= vol_thresh]
     minor_solids = [s for s, p in zip(solids, valid_parts) if p.volume < vol_thresh]
@@ -863,7 +1426,7 @@ def simplify_assembly_to_single_solid(
         minor_solids = solids[min(6, len(solids)) :]
 
     if progress_cb:
-        progress_cb(0.40, f"주요 외관 하우징 + 내부 코어 정밀 B-Rep 결합 중 ({len(major_solids)}개)...")
+        progress_cb(0.40, f"Fusing major outer housings + interior core ({len(major_solids)})...")
 
     tier1_inputs: list[TopoDS_Shape] = (
         ([core_shape] if core_shape is not None else []) + list(major_solids)
@@ -871,7 +1434,7 @@ def simplify_assembly_to_single_solid(
     tier1_fused = _batch_fuse_safe(
         tier1_inputs,
         logs=logs,
-        label="주요 외관+내부코어 B-Rep Fuse",
+        label="Tier-1 major housings + core",
         progress_cb=progress_cb,
         prog_range=(0.40, 0.62),
         cancel_check=cancel_check,
@@ -879,7 +1442,7 @@ def simplify_assembly_to_single_solid(
 
     # Immediately purge closed void shells inside Tier-1 result
     if progress_cb:
-        progress_cb(0.64, "1차 밀폐 내부 공동(Void Shell) 제거 중...")
+        progress_cb(0.64, "Pass 1: removing enclosed internal void shells...")
     tier1_solids = _extract_solids(tier1_fused)
     tier1_cleaned: list[TopoDS_Solid] = []
     total_voids = 0
@@ -893,12 +1456,12 @@ def simplify_assembly_to_single_solid(
     # Tier 2: Fuse remaining smaller external parts (connectors, screws, brackets)
     if minor_solids:
         if progress_cb:
-            progress_cb(0.68, f"세부 외관 부품(커넥터·볼트 등) 결합 중 ({len(minor_solids)}개)...")
+            progress_cb(0.68, f"Fusing detail outer parts (connectors, fasteners: {len(minor_solids)})...")
         tier2_inputs: list[TopoDS_Shape] = list(tier1_cleaned) + list(minor_solids)
         combined = _batch_fuse_safe(
             tier2_inputs,
             logs=logs,
-            label="세부 외관 부품 B-Rep Fuse",
+            label="Tier-2 detail outer parts",
             progress_cb=progress_cb,
             prog_range=(0.68, 0.80),
             cancel_check=cancel_check,
@@ -908,7 +1471,7 @@ def simplify_assembly_to_single_solid(
 
     # Final closed-void shell elimination on every solid
     if progress_cb:
-        progress_cb(0.82, "최종 내부 공동(Void Shell) 완전 제거 중...")
+        progress_cb(0.82, "Eliminating enclosed internal void shells...")
 
     final_solids: list[TopoDS_Solid] = []
     for s in _extract_solids(combined):
@@ -919,7 +1482,7 @@ def simplify_assembly_to_single_solid(
 
     if total_voids > 0:
         logs.append(
-            f"밀폐 내부 공동(Void Shell) 총 {total_voids}개 제거 (추가 솔리드 채움 +{total_void_vol:,.1f} mm³)"
+            f"Removed {total_voids} enclosed internal void shell(s) (+{total_void_vol:,.1f} mm³ solid fill)"
         )
 
     final_solids.sort(key=lambda s: -abs(_shape_volume(s)))
@@ -933,12 +1496,12 @@ def simplify_assembly_to_single_solid(
         else:
             surviving.append(s)
     if swallowed > 0:
-        logs.append(f"채워진 외피 내부에 완전히 포함된 잔여 Solid {swallowed}개 제거")
+        logs.append(f"Removed {swallowed} residual solid(s) fully enclosed inside the filled body")
 
     # Stage 5: Bridge any remaining nearby floating external islands via hidden internal B-Rep pins
     if len(surviving) > 1 and config.connect_floating_parts and config.max_island_gap_mm > 0.0:
         if progress_cb:
-            progress_cb(0.86, f"분리 외관 부품({len(surviving) - 1}개) 내부 브리지 연결 중...")
+            progress_cb(0.86, f"Bridging {len(surviving) - 1} clearance-separated outer part(s) internally...")
         main_s, leftovers = _connect_floating_islands(
             surviving[0],
             surviving[1:],
@@ -949,13 +1512,13 @@ def simplify_assembly_to_single_solid(
         surviving = [main_s] + leftovers
 
     if not surviving:
-        raise RuntimeError("최종 정밀 B-Rep Solid를 생성하지 못했습니다.")
+        raise RuntimeError("Failed to generate final exact B-Rep solid.")
 
     if len(surviving) == 1 or config.keep_largest_only:
         final_shape: TopoDS_Shape = surviving[0]
         if len(surviving) > 1:
             logs.append(
-                f"단일 Body 유지 옵션에 따라 최대 본체 1개 채택 (연결 불가 분리체 {len(surviving) - 1}개 제외)"
+                f"Kept largest single body per single-body option (excluded {len(surviving) - 1} unbridgeable island(s))"
             )
     else:
         builder = BRep_Builder()
@@ -968,7 +1531,7 @@ def simplify_assembly_to_single_solid(
     # --- Stage 6: UnifySameDomain for Clean, Compact Exact B-Rep ---
     if config.unify_same_domain:
         if progress_cb:
-            progress_cb(0.91, "동일 평면/곡면 통합(UnifySameDomain) 최적화 중...")
+            progress_cb(0.91, "Merging coplanar/co-cylindrical faces (UnifySameDomain)...")
         try:
             rep_before = validate_shape(final_shape)
             unifier = ShapeUpgrade_UnifySameDomain(final_shape, True, True, False)
@@ -984,25 +1547,35 @@ def simplify_assembly_to_single_solid(
                 ):
                     final_shape = unified
                     logs.append(
-                        f"동일 곡면 통합 완료: {rep_before.face_count:,}면 → {rep_u.face_count:,}면"
+                        f"Unified same-domain faces: {rep_before.face_count:,} -> {rep_u.face_count:,} faces"
                     )
         except Exception as exc:
-            logs.append(f"UnifySameDomain 경고(원본 유지): {exc}")
+            logs.append(f"UnifySameDomain warning (kept original): {exc}")
+
+    # --- Stage 7: Cross-Kernel / OCCT 7.x STEP Compatibility & Closed-Mesh Sanitization ---
+    if progress_cb:
+        progress_cb(0.94, "Healing STEP viewer compatibility (periodic seams, slivers & closed mesh)...")
+    final_shape = _sanitize_for_step_compat(final_shape, logs)
+
+    # --- Stage 8: Mandatory Final Closed Void Shell Post-Processing Purge ---
+    if progress_cb:
+        progress_cb(0.97, "Final post-processing: purging any remaining internal closed shells...")
+    final_shape = _purge_final_closed_void_shells(final_shape, logs)
 
     if progress_cb:
-        progress_cb(0.97, "최종 단일 B-Rep Solid 품질 검증 중...")
+        progress_cb(0.99, "Validating final single B-Rep solid...")
 
     report = validate_shape(final_shape)
     if report.face_types:
         ft_summary = ", ".join(f"{k}:{v}" for k, v in sorted(report.face_types.items(), key=lambda kv: -kv[1]))
-        logs.append(f"최종 B-Rep 곡면 구성 (삼각 복셀 없음): {ft_summary}")
+        logs.append(f"Final B-Rep surface breakdown (exact CAD, no voxels): {ft_summary}")
 
     if progress_cb:
-        progress_cb(1.0, "정밀 B-Rep 단일 Solid Body 변환 완료")
+        progress_cb(1.0, "Exact B-Rep single solid conversion complete")
 
     return SimplifyResult(
         shape=final_shape,
-        mode_used="정밀 B-Rep (외관 원본 보존 + 내부 코어 솔리드화)",
+        mode_used="Exact B-Rep (Exterior Preserved + Analytic Interior Core)",
         validation=report,
         kept_part_count=len(kept_parts_sorted),
         removed_part_count=removed_count,

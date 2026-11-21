@@ -134,23 +134,23 @@ class BusyBanner(tk.Frame):
         # Right: Flat Danger Cancel / Force-Stop button
         self._cancel_btn = ttk.Button(
             self,
-            text="작업 취소",
+            text="Cancel",
             style="Danger.TButton",
             command=self._handle_cancel_click,
-            width=10,
+            width=11,
         )
         self._cancel_btn.grid(row=0, column=2, rowspan=2, padx=(12, 0), sticky=tk.E)
 
-    def start(self, task_name: str, detail: str = "백그라운드 CAD 엔진에서 처리 중...") -> None:
+    def start(self, task_name: str, detail: str = "Processing in background CAD engine...") -> None:
         self._active = True
         self._cancel_requested = False
         self._start_time = time.perf_counter()
         self._fraction = 0.0
-        self._title_var.set(f"백그라운드 작업 중 · {task_name}")
+        self._title_var.set(f"Working · {task_name}")
         self._detail_var.set(detail)
         self._pct_var.set("0%")
-        self._timer_var.set("경과 00:00.0")
-        self._cancel_btn.configure(text="작업 취소", state=tk.NORMAL)
+        self._timer_var.set("Elapsed 00:00.0")
+        self._cancel_btn.configure(text="Cancel", state=tk.NORMAL)
 
         if self._anim_after_id is None:
             self._tick_animation()
@@ -163,8 +163,8 @@ class BusyBanner(tk.Frame):
 
     def mark_cancelling(self) -> None:
         self._cancel_requested = True
-        self._detail_var.set("취소 요청됨 — 현재 C++ 연산 종료 대기 중 (즉시 중단하려면 '강제 중단' 클릭)")
-        self._cancel_btn.configure(text="강제 중단")
+        self._detail_var.set("Cancellation requested — waiting for current C++ step (click 'Force Stop' to abort immediately)")
+        self._cancel_btn.configure(text="Force Stop")
 
     def stop(self) -> None:
         self._active = False
@@ -202,7 +202,7 @@ class BusyBanner(tk.Frame):
         elapsed = max(0.0, time.perf_counter() - self._start_time)
         mins = int(elapsed // 60)
         secs = elapsed % 60.0
-        self._timer_var.set(f"경과 {mins:02d}:{secs:04.1f}")
+        self._timer_var.set(f"Elapsed {mins:02d}:{secs:04.1f}")
 
         w = max(self._bar.winfo_width(), 120)
         fill_w = w * self._fraction

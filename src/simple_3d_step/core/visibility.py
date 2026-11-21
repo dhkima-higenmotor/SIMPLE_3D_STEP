@@ -118,7 +118,7 @@ def analyze_visibility(
         return VisibilityResult(tessellated=tessellated)
 
     if progress_cb:
-        progress_cb(0.38, f"Embree BVH 가속 구조 구축 중 (삼각형 {n_tris:,}개)...")
+        progress_cb(0.38, f"Building Embree BVH acceleration structure ({n_tris:,} triangles)...")
 
     intersector = mesh.ray
     center = 0.5 * (assembly.bbox_min + assembly.bbox_max)
@@ -144,11 +144,11 @@ def analyze_visibility(
 
     for v_idx, v_pos in enumerate(view_dirs):
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
 
         if progress_cb and (v_idx % max(1, n_views // 20) == 0 or v_idx == n_views - 1):
             frac = 0.40 + 0.40 * ((v_idx + 1) / n_views)
-            progress_cb(frac, f"Pass 1 외부 Ray Casting ({v_idx + 1}/{n_views} 시점)...")
+            progress_cb(frac, f"Pass 1 external ray casting ({v_idx + 1}/{n_views} views)...")
 
         ray_dir = -v_pos
         u, v = _orthonormal_basis(ray_dir)
@@ -222,12 +222,12 @@ def analyze_visibility(
 
         for b_idx, pid in enumerate(borderline_parts):
             if cancel_check and cancel_check():
-                raise InterruptedError("사용자가 작업을 취소했습니다.")
+                raise InterruptedError("Operation cancelled by user.")
 
             if progress_cb and (b_idx % max(1, n_border // 15) == 0 or b_idx == n_border - 1):
                 frac = 0.80 + 0.17 * ((b_idx + 1) / n_border)
                 progress_cb(
-                    frac, f"Pass 2 경계/소형 부품 역방향 검증 ({b_idx + 1}/{n_border})..."
+                    frac, f"Pass 2 reverse verification for borderline/small parts ({b_idx + 1}/{n_border})..."
                 )
 
             part = part_map[pid]
@@ -283,7 +283,7 @@ def analyze_visibility(
     if progress_cb:
         progress_cb(
             1.0,
-            f"가시성 분석 완료: 외부 유지 {ext_count}개 / 내부 삭제 {int_count}개",
+            f"Visibility analysis complete: keep {ext_count} external / drop {int_count} internal",
         )
 
     return VisibilityResult(

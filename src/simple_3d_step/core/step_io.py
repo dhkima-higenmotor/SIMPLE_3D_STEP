@@ -12,11 +12,17 @@ from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Builder
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepGProp import BRepGProp
+from OCP.BRepTools import BRepTools
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.Interface import Interface_Static
+from OCP.ShapeAnalysis import ShapeAnalysis_ShapeTolerance
 from OCP.STEPCAFControl import STEPCAFControl_Reader
-from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+from OCP.STEPControl import (
+    STEPControl_AsIs,
+    STEPControl_ManifoldSolidBrep,
+    STEPControl_Writer,
+)
 from OCP.TCollection import TCollection_ExtendedString
 from OCP.TDataStd import TDataStd_Name
 from OCP.TDF import TDF_Label
@@ -123,10 +129,10 @@ def load_step_assembly(
     """Load a STEP file via XCAF and normalize all leaf solids/shells into PartNodes."""
     source_path = Path(filepath).resolve()
     if not source_path.exists():
-        raise FileNotFoundError(f"STEP 파일을 찾을 수 없습니다: {source_path}")
+        raise FileNotFoundError(f"STEP file not found: {source_path}")
 
     if progress_cb:
-        progress_cb(0.05, f"STEP 파일 읽는 중: {source_path.name}")
+        progress_cb(0.05, f"Reading STEP file: {source_path.name}")
 
     read_path, tmp_dir = _ensure_ascii_read_path(source_path)
     try:
@@ -142,16 +148,16 @@ def load_step_assembly(
 
         status = reader.ReadFile(str(read_path))
         if status != IFSelect_RetDone:
-            raise RuntimeError(f"STEP 파일 파싱 실패 (status={status}): {source_path.name}")
+            raise RuntimeError(f"Failed to parse STEP file (status={status}): {source_path.name}")
 
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
 
         if progress_cb:
-            progress_cb(0.35, "XCAF 어셈블리 데이터 변환 중...")
+            progress_cb(0.35, "Translating XCAF assembly document...")
 
         if not reader.Transfer(doc):
-            raise RuntimeError(f"STEP XCAF 문서 변환 실패: {source_path.name}")
+            raise RuntimeError(f"Failed to transfer STEP XCAF document: {source_path.name}")
     finally:
         if tmp_dir and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -170,7 +176,7 @@ def load_step_assembly(
     shape_tool.GetFreeShapes(root_labels)
 
     if progress_cb:
-        progress_cb(0.55, "어셈블리 계층 및 부품 목록 추출 중...")
+        progress_cb(0.55, "Extracting assembly hierarchy and leaf parts...")
 
     parts: list[PartNode] = []
     compound_builder = BRep_Builder()
@@ -186,7 +192,7 @@ def load_step_assembly(
         total_sub = len(sub_shapes)
         for idx, sub in enumerate(sub_shapes, start=1):
             if cancel_check and cancel_check():
-                raise InterruptedError("사용자가 작업을 취소했습니다.")
+                raise InterruptedError("Operation cancelled by user.")
             part_name = base_name if total_sub == 1 else f"{base_name} [Body {idx}]"
             full_path = path_str if total_sub == 1 else f"{path_str} [Body {idx}]"
             vol, area, face_cnt = _compute_shape_props(sub)
@@ -213,7 +219,7 @@ def load_step_assembly(
 
     def _traverse(label: TDF_Label, parent_loc: TopLoc_Location, path_parts: list[str]) -> None:
         if cancel_check and cancel_check():
-            raise InterruptedError("사용자가 작업을 취소했습니다.")
+            raise InterruptedError("Operation cancelled by user.")
 
         label_name = _get_label_name(label)
         if XCAFDoc_ShapeTool.IsReference_s(label):
@@ -250,7 +256,7 @@ def load_step_assembly(
         _traverse(root_label, identity_loc, [])
 
     if progress_cb:
-        progress_cb(0.95, f"총 {len(parts)}개 Solid/Shell 부품 로드 완료")
+        progress_cb(0.95, f"Loaded {len(parts)} Solid/Shell parts")
 
     if parts:
         global_min = np.min(np.vstack([p.bbox_min for p in parts]), axis=0)
@@ -260,7 +266,7 @@ def load_step_assembly(
         global_max = np.zeros(3, dtype=np.float64)
 
     if progress_cb:
-        progress_cb(1.0, f"로드 완료 ({len(parts)}개 부품)")
+        progress_cb(1.0, f"Loaded ({len(parts)} parts)")
 
     return AssemblyModel(
         source_path=source_path,
@@ -289,29 +295,55 @@ def save_shape_to_step(
     schema: str = "AP214",
     unit: str = "MM",
 ) -> Path:
-    """Write a TopoDS_Shape to a STEP file, handling non-ASCII Windows paths safely."""
+    """Write a TopoDS_Shape to a clean cross-kernel STEP file (3D curves, clamped precision).
+
+    Disables explicit OCCT PCURVE export (write.surfacecurve.mode=0) and writes a tight,
+    clamped STEP uncertainty [1e-5, 1e-3] derived from the shape's average tolerance so
+    both Parasolid (SolidWorks/eDrawings) and older OCCT 7.x viewers (CAD Assistant)
+    import solids cleanly without collapsing fine edges or breaking shells.
+    """
     dest = Path(output_path).resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    # Remove any cached mesh triangulations before STEP export
+    BRepTools.Clean_s(shape)
+
+    # Instantiate STEPControl_Writer BEFORE setting Interface_Static parameters so OCCT's
+    # STEP controller initialization does not reset our custom export settings in a fresh process.
+    writer = STEPControl_Writer()
+
     Interface_Static.SetCVal_s("write.step.schema", schema)
     Interface_Static.SetCVal_s("write.step.unit", unit)
+    # 0 = 3D curves only (matches SolidWorks STEP export; avoids OCCT 8->7 PCURVE issues)
+    Interface_Static.SetIVal_s("write.surfacecurve.mode", 0)
+    # Compute average shape tolerance and clamp to [1e-5, 1e-3] (matches SolidWorks 1e-5 on
+    # clean geometry and prevents mode=1/Max from bloating UNCERTAINTY to 1e-2 and collapsing
+    # sub-0.01 mm edges in OCCT 7.x STEP readers).
+    avg_tol = float(ShapeAnalysis_ShapeTolerance().Tolerance(shape, 0))
+    clamped_prec = max(1e-5, min(1e-3, avg_tol))
+    Interface_Static.SetIVal_s("write.precision.mode", 2)
+    Interface_Static.SetRVal_s("write.precision.val", clamped_prec)
 
-    writer = STEPControl_Writer()
-    writer.Transfer(shape, STEPControl_AsIs)
+    transfer_mode = (
+        STEPControl_ManifoldSolidBrep
+        if shape.ShapeType() == TopAbs_SOLID
+        else STEPControl_AsIs
+    )
+    writer.Transfer(shape, transfer_mode)
 
     dest_str = str(dest)
     try:
         dest_str.encode("ascii")
         status = writer.Write(dest_str)
         if status != IFSelect_RetDone:
-            raise RuntimeError(f"STEP 파일 저장 실패 (status={status}): {dest}")
+            raise RuntimeError(f"Failed to write STEP file (status={status}): {dest}")
     except UnicodeEncodeError:
         tmp_dir = Path(tempfile.mkdtemp(prefix="s3d_write_"))
         try:
             tmp_file = tmp_dir / "output.step"
             status = writer.Write(str(tmp_file))
             if status != IFSelect_RetDone:
-                raise RuntimeError(f"STEP 파일 저장 실패 (status={status}): {dest}")
+                raise RuntimeError(f"Failed to write STEP file (status={status}): {dest}")
             shutil.copy2(tmp_file, dest)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

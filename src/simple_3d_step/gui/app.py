@@ -27,7 +27,7 @@ from simple_3d_step.gui.theme import COLORS, FONTS, STEP_STYLES, apply_modern_fl
 from simple_3d_step.models import AssemblyModel, SimplifyResult
 
 
-BASE_TITLE = "SIMPLE 3D STEP — 내부 부품 삭제 및 외관 보존 정밀 B-Rep 단순화 도구"
+BASE_TITLE = "SIMPLE 3D STEP — Internal Part Removal & Exact B-Rep Solidifier"
 
 
 class Simple3DStepApp(tk.Tk):
@@ -86,10 +86,10 @@ class Simple3DStepApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(40, self._poll_worker)
 
-        viewer_info = self._config.viewer_executable or "(Windows 기본 연결 프로그램)"
-        self._log_panel.append_log(f"설정 로드 완료: {self._config_path}")
-        self._log_panel.append_log(f"외부 3D 뷰어: {viewer_info}")
-        self._log_panel.append_log("백그라운드 CAD 전용 프로세스 시작 중 (GUI 프리징 방지 모드)...")
+        viewer_info = self._config.viewer_executable or "(Windows Default Application)"
+        self._log_panel.append_log(f"Loaded config: {self._config_path}")
+        self._log_panel.append_log(f"External 3D viewer: {viewer_info}")
+        self._log_panel.append_log("Starting background CAD worker process (freeze-free mode)...")
 
     def _bind_shortcuts(self) -> None:
         self.bind_all("<Control-o>", lambda _e: self._on_open_step())
@@ -102,7 +102,7 @@ class Simple3DStepApp(tk.Tk):
         label: str,
         command: Callable[[], None],
     ) -> tuple[tk.Frame, tk.Button]:
-        """Create a crisp 1px-bordered Modern Flat workflow step button with hover feedback."""
+        """Create a crisp 1px-bordered Modern Flat workflow step button with bold typography."""
         border_wrap = tk.Frame(parent, background=STEP_STYLES["idle"]["border"], padx=1, pady=1)
         btn = tk.Button(
             border_wrap,
@@ -115,7 +115,7 @@ class Simple3DStepApp(tk.Tk):
             pady=5,
             cursor="hand2",
             disabledforeground=COLORS["text_muted"],
-            font=FONTS["base"],
+            font=FONTS["base_bold"],
         )
         btn.pack(fill=tk.BOTH, expand=True)
 
@@ -179,55 +179,55 @@ class Simple3DStepApp(tk.Tk):
             ).pack(side=tk.LEFT)
 
         w_open, self._tb_open = self._make_step_button(
-            self._toolbar_row1, "open", "STEP 열기", self._on_open_step
+            self._toolbar_row1, "open", "Open STEP", self._on_open_step
         )
         w_open.pack(side=tk.LEFT)
         _add_chevron()
 
         w_analyze, self._tb_analyze = self._make_step_button(
-            self._toolbar_row1, "analyze", "1. 내부 부품 분석", self._on_analyze
+            self._toolbar_row1, "analyze", "1. Analyze Parts", self._on_analyze
         )
         w_analyze.pack(side=tk.LEFT)
         _add_chevron()
 
         w_simplify, self._tb_simplify = self._make_step_button(
-            self._toolbar_row1, "simplify", "2. 단일 Solid 변환", self._on_simplify
+            self._toolbar_row1, "simplify", "2. Convert to Solid", self._on_simplify
         )
         w_simplify.pack(side=tk.LEFT)
         _add_chevron()
 
         w_save, self._tb_save = self._make_step_button(
-            self._toolbar_row1, "save", "결과 저장", self._on_save_result
+            self._toolbar_row1, "save", "Save Result", self._on_save_result
         )
         w_save.pack(side=tk.LEFT)
 
-        # Row 2: External 3D viewer actions (left) + [파라미터] toggle & [뷰어 설정] (right)
+        # Row 2: External 3D viewer actions (left) + [Parameters] toggle & [Viewer Settings] (right)
         self._toolbar_row2 = tk.Frame(header_card, background=COLORS["surface"])
         self._toolbar_row2.pack(fill=tk.X, padx=10, pady=(2, 7))
 
         self._tb_view_orig = ttk.Button(
-            self._toolbar_row2, text="원본 뷰어", style="Toolbar.TButton", command=self._on_view_original
+            self._toolbar_row2, text="Open Original", style="Toolbar.TButton", command=self._on_view_original
         )
         self._tb_view_orig.pack(side=tk.LEFT, padx=(0, 6))
 
         self._tb_view_kept = ttk.Button(
-            self._toolbar_row2, text="유지 부품 미리보기", style="Toolbar.TButton", command=self._on_view_kept_parts
+            self._toolbar_row2, text="Preview Kept Parts", style="Toolbar.TButton", command=self._on_view_kept_parts
         )
         self._tb_view_kept.pack(side=tk.LEFT, padx=(0, 6))
 
         self._tb_view_res = ttk.Button(
-            self._toolbar_row2, text="결과 뷰어", style="Toolbar.TButton", command=self._on_view_result
+            self._toolbar_row2, text="Open Result", style="Toolbar.TButton", command=self._on_view_result
         )
         self._tb_view_res.pack(side=tk.LEFT)
 
-        # Right side: [파라미터] toggle button directly to the left of [뷰어 설정]
+        # Right side: [Parameters] toggle button directly to the left of [Viewer Settings]
         ttk.Button(
-            self._toolbar_row2, text="뷰어 설정", style="Toolbar.TButton", command=self._on_open_settings
+            self._toolbar_row2, text="Viewer Settings", style="Toolbar.TButton", command=self._on_open_settings
         ).pack(side=tk.RIGHT)
 
         self._tb_params = ttk.Checkbutton(
             self._toolbar_row2,
-            text="파라미터",
+            text="Parameters",
             style="Toolbar.Toolbutton",
             variable=self._params_visible_var,
             command=self._toggle_params_panel,
@@ -237,7 +237,7 @@ class Simple3DStepApp(tk.Tk):
         tk.Frame(header_card, height=1, background=COLORS["border"]).pack(fill=tk.X)
 
         # 2. Clean file & result summary status strip
-        self._file_var = tk.StringVar(value="열린 파일 없음 — 상단 [STEP 열기] 버튼으로 파일을 선택하세요.")
+        self._file_var = tk.StringVar(value="No file loaded — click [Open STEP] above to select a file.")
         self._result_badge_var = tk.StringVar(value="")
 
         self._info_bar = tk.Frame(self, background=COLORS["surface_alt"], padx=12, pady=5)
@@ -290,7 +290,7 @@ class Simple3DStepApp(tk.Tk):
             on_open_result_viewer=self._on_view_result,
         )
 
-        # Only show PartTree by default; ControlPanel is toggled via [파라미터] button
+        # Only show PartTree by default; ControlPanel is toggled via [Parameters] button
         self._main_pane.add(self._part_tree, weight=3)
 
     def _toggle_params_panel(self) -> None:
@@ -377,8 +377,8 @@ class Simple3DStepApp(tk.Tk):
         self._active_cmd_id = self._worker.submit(cmd_name, payload)
 
         self._show_busy_banner(task_name)
-        self._log_panel.set_progress(0.0, f"{task_name} 진행 중...")
-        self._log_panel.append_log(f"▶ {task_name} 시작 (백그라운드 CAD 프로세스)")
+        self._log_panel.set_progress(0.0, f"{task_name} in progress...")
+        self._log_panel.append_log(f"▶ Started: {task_name} (background CAD process)")
         self._update_ui_state()
 
     def _on_cancel_task(self) -> None:
@@ -387,7 +387,7 @@ class Simple3DStepApp(tk.Tk):
         self._worker.request_cancel()
         self._busy_banner.mark_cancelling()
         self._log_panel.append_log(
-            "취소 요청 전송됨 — 현재 C++ 연산 종료 대기 중 (즉시 중단하려면 상단 [강제 중단] 클릭)"
+            "Cancel requested — waiting for current C++ step (click [Force Stop] above to abort immediately)"
         )
 
     def _on_force_cancel_task(self) -> None:
@@ -407,22 +407,22 @@ class Simple3DStepApp(tk.Tk):
         self._control_panel.update_result(None)
         self._set_result_badge("")
         self._reset_steps_from(("open", "analyze", "simplify", "save"))
-        self._file_var.set("강제 중단으로 CAD 엔진이 재시작되었습니다 — STEP 파일을 다시 열어 주세요.")
-        self._log_panel.set_progress(0.0, f"{task_name} 강제 중단됨")
+        self._file_var.set("CAD engine restarted after force stop — please open the STEP file again.")
+        self._log_panel.set_progress(0.0, f"{task_name} force stopped")
         self._log_panel.append_log(
-            f"■ {task_name} 강제 중단 및 백그라운드 CAD 프로세스 재시작 완료"
+            f"■ Force stopped: {task_name} (background CAD worker restarted)"
         )
         self._update_ui_state()
 
     def _poll_worker(self) -> None:
         if self._busy:
             self.title(
-                f"[작업 중 {self._busy_banner.elapsed_formatted}] {self._active_task_name} — SIMPLE 3D STEP"
+                f"[Working {self._busy_banner.elapsed_formatted}] {self._active_task_name} — SIMPLE 3D STEP"
             )
 
         for ev in self._worker.poll_events():
             if ev.kind == "worker_ready":
-                self._log_panel.append_log("✔ 백그라운드 CAD 전용 프로세스 준비 완료")
+                self._log_panel.append_log("✔ Background CAD worker ready")
                 if self._pending_initial_step is not None and not self._busy:
                     path = self._pending_initial_step
                     self._pending_initial_step = None
@@ -446,8 +446,8 @@ class Simple3DStepApp(tk.Tk):
                 self._active_on_success = None
                 self._active_step_key = None
                 self._hide_busy_banner()
-                self._log_panel.set_progress(1.0, f"{task_name} 완료")
-                self._log_panel.append_log(f"✔ {task_name} 완료")
+                self._log_panel.set_progress(1.0, f"{task_name} completed")
+                self._log_panel.append_log(f"✔ Completed: {task_name}")
                 if step_key is not None:
                     self._apply_step_style(step_key, "done")
                 if cb:
@@ -468,8 +468,8 @@ class Simple3DStepApp(tk.Tk):
                 self._hide_busy_banner()
                 if step_key is not None:
                     self._apply_step_style(step_key, prev_state)
-                self._log_panel.set_progress(0.0, f"{task_name} 취소됨")
-                self._log_panel.append_log(f"■ {task_name} 취소됨: {msg}")
+                self._log_panel.set_progress(0.0, f"{task_name} cancelled")
+                self._log_panel.append_log(f"■ Cancelled: {task_name} — {msg}")
                 self._update_ui_state()
 
             elif ev.kind in ("error", "crashed"):
@@ -489,8 +489,8 @@ class Simple3DStepApp(tk.Tk):
                     self._reset_steps_from(("open", "analyze", "simplify", "save"))
                 elif step_key is not None:
                     self._apply_step_style(step_key, prev_state)
-                self._log_panel.set_progress(0.0, f"{task_name} 오류 발생")
-                self._log_panel.append_log(f"✖ {task_name} 실패: {err_msg}")
+                self._log_panel.set_progress(0.0, f"{task_name} failed")
+                self._log_panel.append_log(f"✖ Failed: {task_name} — {err_msg}")
                 if ev.kind == "crashed":
                     self._assembly = None
                     self._result = None
@@ -498,7 +498,7 @@ class Simple3DStepApp(tk.Tk):
                     self._control_panel.update_result(None)
                     self._set_result_badge("")
                 self._update_ui_state()
-                messagebox.showerror(f"{task_name} 오류", err_msg, parent=self)
+                messagebox.showerror(f"{task_name} Error", err_msg, parent=self)
 
         self.after(40, self._poll_worker)
 
@@ -512,9 +512,9 @@ class Simple3DStepApp(tk.Tk):
             init_dir = str(Path.cwd())
         selected = filedialog.askopenfilename(
             parent=self,
-            title="3D STEP 파일 열기",
+            title="Open 3D STEP File",
             initialdir=init_dir,
-            filetypes=[("STEP 파일", "*.step;*.stp;*.STEP;*.STP"), ("모든 파일", "*.*")],
+            filetypes=[("STEP Files", "*.step;*.stp;*.STEP;*.STP"), ("All Files", "*.*")],
         )
         if selected:
             path = Path(selected)
@@ -542,15 +542,15 @@ class Simple3DStepApp(tk.Tk):
             sz = asm.bbox_max - asm.bbox_min
             size_mb = src.stat().st_size / (1024 * 1024)
             self._file_var.set(
-                f"파일: {src.name} ({size_mb:.2f} MB)  ·  부품 {len(asm.parts)}개  ·  "
-                f"크기 {sz[0]:.1f} × {sz[1]:.1f} × {sz[2]:.1f} {asm.unit}"
+                f"File: {src.name} ({size_mb:.2f} MB)  ·  {len(asm.parts)} parts  ·  "
+                f"{sz[0]:.1f} × {sz[1]:.1f} × {sz[2]:.1f} {asm.unit}"
             )
             self._log_panel.append_log(
-                f"STEP 로드: {src.name} — 부품 {len(asm.parts)}개, 총 부피 {data['total_volume']:,.1f} mm³"
+                f"Loaded STEP: {src.name} — {len(asm.parts)} parts, total volume {data['total_volume']:,.1f} mm³"
             )
 
         self._submit_worker_task(
-            f"STEP 로드 ({path.name})",
+            f"Load STEP ({path.name})",
             "load_step",
             {"path": str(path)},
             _done,
@@ -570,13 +570,13 @@ class Simple3DStepApp(tk.Tk):
                 self._part_tree.set_parts(self._assembly.parts)
             self._reset_steps_from(("simplify", "save"))
             self._log_panel.append_log(
-                f"가시성 분석 결과: 외부 유지 {data['external_count']}개 / "
-                f"내부 자동 삭제 {data['internal_count']}개 "
-                f"(삼각형 {data['tri_count']:,}개)"
+                f"Visibility analysis: keep {data['external_count']} external / "
+                f"drop {data['internal_count']} internal "
+                f"({data['tri_count']:,} triangles)"
             )
 
         self._submit_worker_task(
-            "내부 부품 가시성 분석",
+            "Internal Part Visibility Analysis",
             "analyze_visibility",
             {"config": vis_cfg, "overrides": self._collect_overrides()},
             _done,
@@ -588,7 +588,7 @@ class Simple3DStepApp(tk.Tk):
             return
         kept_cnt = sum(1 for p in self._assembly.parts if p.keep)
         if kept_cnt == 0:
-            messagebox.showwarning("부품 없음", "유지할 외관 부품을 최소 1개 이상 선택해 주세요.", parent=self)
+            messagebox.showwarning("No Parts Selected", "Please select at least one outer part to keep.", parent=self)
             return
 
         simp_cfg = self._control_panel.build_simplify_config()
@@ -603,19 +603,19 @@ class Simple3DStepApp(tk.Tk):
             status_mark = "✔" if v.is_valid else "⚠"
             self._set_result_badge(
                 f"{status_mark} Solid {v.solid_count} / Shell {v.shell_count} · "
-                f"{v.face_count:,}면 · 채움 +{res.filled_volume_delta:,.0f} mm³",
+                f"{v.face_count:,} faces · Fill +{res.filled_volume_delta:,.0f} mm³",
                 is_ok=v.is_valid,
             )
             for line in res.logs:
                 self._log_panel.append_log(f"  · {line}")
             self._log_panel.append_log(
-                f"검증 요약: Solid={v.solid_count}, Shell={v.shell_count}, "
-                f"Watertight={v.is_watertight}, 부피={v.volume:,.1f} mm³ "
-                f"(내부 채움 +{res.filled_volume_delta:,.1f} mm³)"
+                f"Validation summary: Solid={v.solid_count}, Shell={v.shell_count}, "
+                f"Watertight={v.is_watertight}, Volume={v.volume:,.1f} mm³ "
+                f"(Internal fill +{res.filled_volume_delta:,.1f} mm³)"
             )
 
         self._submit_worker_task(
-            "정밀 B-Rep 단일 Solid 변환",
+            "Exact B-Rep Single Solid Conversion",
             "simplify",
             {"config": simp_cfg, "overrides": self._collect_overrides()},
             _done,
@@ -629,11 +629,11 @@ class Simple3DStepApp(tk.Tk):
         default_name = f"{self._assembly.source_path.stem}_simplified.step"
         selected = filedialog.asksaveasfilename(
             parent=self,
-            title="단순화 STEP 파일 저장",
+            title="Save Simplified STEP File",
             initialdir=init_dir,
             initialfile=default_name,
             defaultextension=".step",
-            filetypes=[("STEP 파일", "*.step;*.stp"), ("모든 파일", "*.*")],
+            filetypes=[("STEP Files", "*.step;*.stp"), ("All Files", "*.*")],
         )
         if not selected:
             return
@@ -648,15 +648,15 @@ class Simple3DStepApp(tk.Tk):
             if self._result is not None:
                 self._result.output_path = saved_path
             size_mb = data["size_bytes"] / (1024 * 1024)
-            self._log_panel.append_log(f"STEP 저장 완료: {saved_path} ({size_mb:.2f} MB)")
+            self._log_panel.append_log(f"Saved STEP: {saved_path} ({size_mb:.2f} MB)")
             messagebox.showinfo(
-                "저장 완료",
-                f"단순화 STEP 파일이 저장되었습니다.\n\n{saved_path}\n({size_mb:.2f} MB)",
+                "Saved",
+                f"Simplified STEP file saved successfully.\n\n{saved_path}\n({size_mb:.2f} MB)",
                 parent=self,
             )
 
         self._submit_worker_task(
-            f"STEP 저장 ({out_path.name})",
+            f"Save STEP ({out_path.name})",
             "save_result",
             {"output_path": str(out_path), "schema": schema},
             _done,
@@ -670,7 +670,7 @@ class Simple3DStepApp(tk.Tk):
             msg = launch_external_viewer(step_path, self._config)
             self._log_panel.append_log(msg)
         except Exception as exc:
-            messagebox.showerror("외부 3D 뷰어 실행 실패", str(exc), parent=self)
+            messagebox.showerror("External 3D Viewer Error", str(exc), parent=self)
 
     def _on_view_original(self) -> None:
         if self._assembly is None:
@@ -682,7 +682,7 @@ class Simple3DStepApp(tk.Tk):
             return
         kept = [p for p in self._assembly.parts if p.keep]
         if not kept:
-            messagebox.showwarning("미리보기 불가", "유지 선택된 부품이 없습니다.", parent=self)
+            messagebox.showwarning("Preview Unavailable", "No kept parts are selected.", parent=self)
             return
 
         preview_path = (
@@ -694,7 +694,7 @@ class Simple3DStepApp(tk.Tk):
             self._launch_viewer_safe(Path(data["output_path"]))
 
         self._submit_worker_task(
-            "유지 부품 외부 뷰어 미리보기 준비",
+            "Prepare Kept Parts Preview",
             "export_kept_preview",
             {
                 "output_path": str(preview_path),
@@ -720,7 +720,7 @@ class Simple3DStepApp(tk.Tk):
             self._launch_viewer_safe(Path(data["output_path"]))
 
         self._submit_worker_task(
-            "결과 외부 뷰어 열기 준비",
+            "Prepare Result Viewer Preview",
             "export_result_preview",
             {"output_path": str(preview_path), "schema": schema},
             _done,
@@ -729,8 +729,8 @@ class Simple3DStepApp(tk.Tk):
     def _on_open_settings(self) -> None:
         def _saved(updated: AppConfig) -> None:
             self._config = updated
-            viewer = updated.viewer_executable or "(Windows 기본 연결 프로그램)"
-            self._log_panel.append_log(f"설정 저장 완료 — 외부 3D 뷰어: {viewer}")
+            viewer = updated.viewer_executable or "(Windows Default Application)"
+            self._log_panel.append_log(f"Settings saved — External 3D viewer: {viewer}")
 
         SettingsDialog(self, self._config, self._config_path, on_saved=_saved)
 

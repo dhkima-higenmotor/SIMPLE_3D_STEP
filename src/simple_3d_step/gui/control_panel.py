@@ -57,7 +57,7 @@ class ControlPanel(tk.Frame):
         self._largest_only_var = tk.BooleanVar(value=app_config.keep_largest_only)
         self._schema_var = tk.StringVar(value=app_config.step_schema or "AP214")
 
-        self._result_var = tk.StringVar(value="아직 단순화가 실행되지 않았습니다.")
+        self._result_var = tk.StringVar(value="Simplification has not been run yet.")
 
         self._build_ui()
 
@@ -67,7 +67,7 @@ class ControlPanel(tk.Frame):
         header.pack(fill=tk.X)
         ttk.Label(
             header,
-            text="고급 파라미터 설정",
+            text="Advanced Parameters",
             style="Subtle.TLabel",
             foreground=COLORS["text"],
             font=FONTS["small_bold"],
@@ -115,47 +115,47 @@ class ControlPanel(tk.Frame):
 
         # --- Tab 1: Visibility Analysis ---
         tab1 = ttk.Frame(nb, style="Card.TFrame", padding=10)
-        nb.add(tab1, text="1. 내부 부품 분석")
+        nb.add(tab1, text="1. Internal Parts")
         tab1.columnconfigure(1, weight=1)
 
         row = 0
-        ttk.Label(tab1, text="시점 프리셋", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab1, text="View Preset", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
         preset_frame = ttk.Frame(tab1, style="Card.TFrame")
         preset_frame.grid(row=row, column=1, sticky=tk.EW, pady=3)
         ttk.Button(
-            preset_frame, text="빠름(26)", style="Small.TButton", width=8,
+            preset_frame, text="Fast(26)", style="Small.TButton", width=8,
             command=lambda: self._apply_vis_preset(26, 112),
         ).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(
-            preset_frame, text="표준(64)", style="Small.TButton", width=8,
+            preset_frame, text="Std(64)", style="Small.TButton", width=8,
             command=lambda: self._apply_vis_preset(64, 160),
         ).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(
-            preset_frame, text="정밀(162)", style="Small.TButton", width=8,
+            preset_frame, text="Fine(162)", style="Small.TButton", width=9,
             command=lambda: self._apply_vis_preset(162, 200),
         ).pack(side=tk.LEFT)
 
         row += 1
-        ttk.Label(tab1, text="구면 시점 수", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab1, text="Sphere Views", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
         ttk.Spinbox(tab1, from_=12, to=300, textvariable=self._num_views_var, width=10).grid(
             row=row, column=1, sticky=tk.EW, pady=3
         )
 
         row += 1
-        ttk.Label(tab1, text="광선 격자 해상도", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab1, text="Ray Grid Resolution", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
         ttk.Spinbox(tab1, from_=48, to=320, increment=16, textvariable=self._grid_res_var, width=10).grid(
             row=row, column=1, sticky=tk.EW, pady=3
         )
 
         row += 1
-        ttk.Label(tab1, text="최소 가시성 임계값(%)", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab1, text="Min Visibility (%)", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
         ttk.Spinbox(
             tab1, from_=0.0, to=20.0, increment=0.1, format="%.2f",
             textvariable=self._min_vis_pct_var, width=10,
         ).grid(row=row, column=1, sticky=tk.EW, pady=3)
 
         row += 1
-        ttk.Label(tab1, text="최소 부품 부피(mm³)", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab1, text="Min Part Volume (mm³)", style="Card.TLabel").grid(row=row, column=0, sticky=tk.W, pady=3)
         ttk.Spinbox(
             tab1, from_=0.0, to=100000.0, increment=50.0, format="%.1f",
             textvariable=self._min_vol_var, width=10,
@@ -164,14 +164,14 @@ class ControlPanel(tk.Frame):
         row += 1
         ttk.Checkbutton(
             tab1,
-            text="Pass 2 경계/소형 부품 역방향 검증 사용",
+            text="Enable Pass 2 reverse check (borderline/small parts)",
             variable=self._pass2_var,
         ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(6, 4))
 
         row += 1
         self._btn_analyze = ttk.Button(
             tab1,
-            text="1단계: 내부 부품 자동 식별 실행",
+            text="Step 1: Run Internal Part Detection",
             style="Primary.TButton",
             command=self._on_analyze,
             state=tk.DISABLED,
@@ -180,36 +180,36 @@ class ControlPanel(tk.Frame):
 
         # --- Tab 2: Pure Exact B-Rep Solidification ---
         tab2 = ttk.Frame(nb, style="Card.TFrame", padding=10)
-        nb.add(tab2, text="2. 정밀 B-Rep 솔리드화")
+        nb.add(tab2, text="2. Exact B-Rep Solid")
         tab2.columnconfigure(1, weight=1)
 
         r = 0
         ttk.Label(
             tab2,
-            text="외관 B-Rep 곡면은 원본 그대로 유지하고 내부만 채웁니다.",
+            text="Preserves all original exterior B-Rep surfaces and fills only internal voids.",
             style="Muted.TLabel",
             foreground=COLORS["accent_text"],
             wraplength=390,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=(0, 6))
 
         r += 1
-        core_box = ttk.LabelFrame(tab2, text="내부 공간 솔리드 채움 (해석적 B-Rep 코어)", padding=7)
+        core_box = ttk.LabelFrame(tab2, text="Internal Solid Fill (Analytic B-Rep Core)", padding=7)
         core_box.grid(row=r, column=0, columnspan=2, sticky=tk.EW, pady=(0, 6))
         core_box.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
             core_box,
-            text="외벽 안쪽 내부 코어 자동 생성·결합",
+            text="Auto-generate & fuse interior analytic core",
             variable=self._fill_core_var,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
 
-        ttk.Label(core_box, text="내부 틈새 브리지(mm)", style="Card.TLabel").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(core_box, text="Internal Bridge Gap (mm)", style="Card.TLabel").grid(row=1, column=0, sticky=tk.W, pady=2)
         ttk.Spinbox(
             core_box, from_=0.0, to=20.0, increment=0.5, format="%.1f",
             textvariable=self._bridge_gap_var, width=10,
         ).grid(row=1, column=1, sticky=tk.EW, pady=2)
 
-        ttk.Label(core_box, text="외관 보호 여백(mm)", style="Card.TLabel").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(core_box, text="Exterior Safety Inset (mm)", style="Card.TLabel").grid(row=2, column=0, sticky=tk.W, pady=2)
         ttk.Spinbox(
             core_box, from_=0.5, to=15.0, increment=0.5, format="%.1f",
             textvariable=self._core_inset_var, width=10,
@@ -218,12 +218,12 @@ class ControlPanel(tk.Frame):
         r += 1
         ttk.Checkbutton(
             tab2,
-            text="공차 분리 외관 부품(커넥터/볼트) 내부 연결",
+            text="Bridge clearance-separated outer parts internally",
             variable=self._connect_islands_var,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=(2, 1))
 
         r += 1
-        ttk.Label(tab2, text="  최대 연결 간격(mm)", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=2)
+        ttk.Label(tab2, text="  Max Bridge Gap (mm)", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=2)
         ttk.Spinbox(
             tab2, from_=0.0, to=15.0, increment=0.5, format="%.1f",
             textvariable=self._island_gap_var, width=10,
@@ -232,12 +232,12 @@ class ControlPanel(tk.Frame):
         r += 1
         ttk.Checkbutton(
             tab2,
-            text="외관 소구경 관통홀 막기 (선택, 기본 해제)",
+            text="Plug small outer through-holes (optional, off by default)",
             variable=self._remove_holes_var,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=(3, 1))
 
         r += 1
-        ttk.Label(tab2, text="  최대 구멍 직경(mm)", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=2)
+        ttk.Label(tab2, text="  Max Hole Diameter (mm)", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=2)
         ttk.Spinbox(
             tab2, from_=0.0, to=100.0, increment=1.0, format="%.1f",
             textvariable=self._max_hole_dia_var, width=10,
@@ -246,19 +246,19 @@ class ControlPanel(tk.Frame):
         r += 1
         ttk.Checkbutton(
             tab2,
-            text="동일 평면/곡면 병합 (UnifySameDomain)",
+            text="Merge coplanar/co-cylindrical faces (UnifySameDomain)",
             variable=self._unify_var,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=(3, 1))
 
         r += 1
         ttk.Checkbutton(
             tab2,
-            text="분리체 잔존 시 최대 본체 1개만 유지",
+            text="Keep largest single body if unbridgeable islands remain",
             variable=self._largest_only_var,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=1)
 
         r += 1
-        ttk.Label(tab2, text="출력 STEP 스키마", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=3)
+        ttk.Label(tab2, text="Output STEP Schema", style="Card.TLabel").grid(row=r, column=0, sticky=tk.W, pady=3)
         ttk.Combobox(
             tab2, textvariable=self._schema_var, values=("AP214", "AP242", "AP203"), state="readonly"
         ).grid(row=r, column=1, sticky=tk.EW, pady=3)
@@ -266,7 +266,7 @@ class ControlPanel(tk.Frame):
         r += 1
         self._btn_simplify = ttk.Button(
             tab2,
-            text="2단계: 정밀 B-Rep 단일 Solid 변환 실행",
+            text="Step 2: Convert to Single B-Rep Solid",
             style="Primary.TButton",
             command=self._on_simplify,
             state=tk.DISABLED,
@@ -274,7 +274,7 @@ class ControlPanel(tk.Frame):
         self._btn_simplify.grid(row=r, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
 
         # --- Validation & Result Summary Card ---
-        res_card = ttk.LabelFrame(body, text="단순화 결과 및 B-Rep 검증 요약", padding=8)
+        res_card = ttk.LabelFrame(body, text="Result & B-Rep Validation Summary", padding=8)
         res_card.pack(fill=tk.X, expand=False, pady=(10, 0))
 
         ttk.Label(
@@ -288,12 +288,12 @@ class ControlPanel(tk.Frame):
         btn_row = ttk.Frame(res_card, style="Card.TFrame", padding=(0, 8, 0, 0))
         btn_row.pack(fill=tk.X)
         self._btn_save = ttk.Button(
-            btn_row, text="결과 STEP 저장...", style="Small.TButton",
+            btn_row, text="Save Result STEP...", style="Small.TButton",
             command=self._on_save_result, state=tk.DISABLED,
         )
         self._btn_save.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         self._btn_view_res = ttk.Button(
-            btn_row, text="결과 뷰어로 열기", style="Small.TButton",
+            btn_row, text="Open in 3D Viewer", style="Small.TButton",
             command=self._on_open_result_viewer, state=tk.DISABLED,
         )
         self._btn_view_res.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -357,23 +357,23 @@ class ControlPanel(tk.Frame):
 
     def update_result(self, result: Optional[SimplifyResult]) -> None:
         if result is None:
-            self._result_var.set("아직 단순화가 실행되지 않았습니다.")
+            self._result_var.set("Simplification has not been run yet.")
             return
         v = result.validation
-        valid_txt = "정상 (단일 밀폐 B-Rep Solid)" if v.is_valid else "경고 있음"
-        wt_txt = "밀폐(Watertight)" if v.is_watertight else f"열린 엣지 {v.free_edge_count}개"
+        valid_txt = "Valid (Single Watertight B-Rep Solid)" if v.is_valid else "Warnings present"
+        wt_txt = "Watertight" if v.is_watertight else f"{v.free_edge_count} free edges"
         ft_txt = ", ".join(
             f"{k}:{cnt}" for k, cnt in sorted(v.face_types.items(), key=lambda kv: -kv[1])[:5]
         )
         lines = [
-            f"• 검증 상태: {valid_txt}",
-            f"• Solid / Shell 수: {v.solid_count} / {v.shell_count}",
-            f"• 밀폐 여부: {wt_txt}",
-            f"• 최종 면 수: {v.face_count:,} ({ft_txt})",
-            f"• 최종 부피: {v.volume:,.1f} mm³ (채움 +{result.filled_volume_delta:,.1f})",
-            f"• 외형 크기: {v.bbox_size[0]:.2f} × {v.bbox_size[1]:.2f} × {v.bbox_size[2]:.2f} mm",
-            f"• 소요 시간: {result.elapsed_seconds:.2f}초",
+            f"• Validation: {valid_txt}",
+            f"• Solids / Shells: {v.solid_count} / {v.shell_count}",
+            f"• Closure: {wt_txt}",
+            f"• Final Faces: {v.face_count:,} ({ft_txt})",
+            f"• Final Volume: {v.volume:,.1f} mm³ (Fill +{result.filled_volume_delta:,.1f})",
+            f"• Bounding Box: {v.bbox_size[0]:.2f} × {v.bbox_size[1]:.2f} × {v.bbox_size[2]:.2f} mm",
+            f"• Elapsed: {result.elapsed_seconds:.2f}s",
         ]
         if v.warnings:
-            lines.append("• 경고: " + " / ".join(v.warnings))
+            lines.append("• Warnings: " + " / ".join(v.warnings))
         self._result_var.set("\n".join(lines))

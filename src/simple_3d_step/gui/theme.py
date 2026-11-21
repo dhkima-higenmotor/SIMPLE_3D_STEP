@@ -45,16 +45,16 @@ COLORS = {
 
 # Large high-readability fonts (~2x original 8-10pt scale)
 FONTS = {
-    "base": ("Malgun Gothic", 15),
-    "base_bold": ("Malgun Gothic", 15, "bold"),
-    "small": ("Malgun Gothic", 13),
-    "small_bold": ("Malgun Gothic", 13, "bold"),
-    "heading": ("Malgun Gothic", 17, "bold"),
+    "base": ("Segoe UI", 15),
+    "base_bold": ("Segoe UI", 15, "bold"),
+    "small": ("Segoe UI", 13),
+    "small_bold": ("Segoe UI", 13, "bold"),
+    "heading": ("Segoe UI", 17, "bold"),
     "mono": ("Consolas", 14),
     "mono_bold": ("Consolas", 14, "bold"),
 }
 
-# Sequential workflow button visual states (1px flat border + hover palette)
+# Sequential workflow button visual states (1px flat border + bold emphasis in all states)
 STEP_STYLES = {
     "idle": {
         "bg": "#ffffff",
@@ -62,7 +62,7 @@ STEP_STYLES = {
         "fg": "#1e293b",
         "border": "#cbd5e1",
         "prefix": "",
-        "font": FONTS["base"],
+        "font": FONTS["base_bold"],
     },
     "running": {
         "bg": "#eff6ff",
@@ -292,7 +292,7 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
         foreground=[("disabled", COLORS["text_muted"])],
     )
 
-    # Modern Flat Toggle Button (for [파라미터] button)
+    # Modern Flat Toggle Button (for [Parameters] button)
     style.configure(
         "Toolbar.Toolbutton",
         background=COLORS["surface_alt"],
@@ -393,7 +393,7 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
         expand=[("selected", [0, 0, 0, 1])],
     )
 
-    # Flat Crisp Treeview (scaled rowheight for 14-15pt Korean text)
+    # Flat Crisp Treeview (scaled rowheight for large 13-15pt UI text)
     style.configure(
         "Treeview",
         background=COLORS["surface"],
