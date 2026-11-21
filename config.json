@@ -1,0 +1,20 @@
+{
+  "viewer_executable": "C:/Program Files/CAD Assistant/CADAssistant.exe",
+  "viewer_args": "{file}",
+  "last_open_dir": "D:\\github\\N60\\3D\\AA600\\2D\\STEP_ASM",
+  "last_save_dir": "C:\\Users\\dhkima\\AppData\\Local\\Temp\\pytest-of-dhkima\\pytest-17\\test_save_dialog_defaults_to_s0\\other_folder",
+  "num_views": 162,
+  "grid_resolution": 200,
+  "min_visible_ratio_pct": 0.5,
+  "enable_pass2_verify": true,
+  "fill_internal_core": true,
+  "core_bridge_gap_mm": 3.5,
+  "core_inset_mm": 2.0,
+  "connect_floating_parts": true,
+  "max_island_gap_mm": 3.0,
+  "remove_small_holes": false,
+  "max_hole_diameter": 10.0,
+  "unify_same_domain": true,
+  "keep_largest_only": true,
+  "step_schema": "AP214"
+}

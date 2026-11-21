@@ -1,0 +1,742 @@
+"""Main Modern Flat Tkinter / ttk window backed by a separate CAD worker process."""
+
+from __future__ import annotations
+
+import tempfile
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import Any, Callable, Optional
+
+import numpy as np
+
+from simple_3d_step.config import (
+    AppConfig,
+    get_default_config_path,
+    launch_external_viewer,
+    load_config,
+    save_config,
+)
+from simple_3d_step.core.worker import CadWorkerClient
+from simple_3d_step.gui.busy_banner import BusyBanner
+from simple_3d_step.gui.control_panel import ControlPanel
+from simple_3d_step.gui.log_panel import LogPanel
+from simple_3d_step.gui.part_tree import PartTreePanel
+from simple_3d_step.gui.settings_dialog import SettingsDialog
+from simple_3d_step.gui.theme import COLORS, FONTS, STEP_STYLES, apply_modern_flat_theme
+from simple_3d_step.models import AssemblyModel, SimplifyResult
+
+
+BASE_TITLE = "SIMPLE 3D STEP — 내부 부품 삭제 및 외관 보존 정밀 B-Rep 단순화 도구"
+
+
+class Simple3DStepApp(tk.Tk):
+    """Desktop GUI for removing internal STEP parts and creating a solid outer body."""
+
+    def __init__(self, initial_step: Optional[Path] = None) -> None:
+        super().__init__()
+        self.title(BASE_TITLE)
+
+        # Compact default window size (smaller than before) while preventing any clipping
+        scr_w = self.winfo_screenwidth()
+        scr_h = self.winfo_screenheight()
+        win_w = min(1140, max(980, scr_w - 100))
+        win_h = min(760, max(660, scr_h - 120))
+        self.geometry(f"{win_w}x{win_h}")
+        self.minsize(960, 640)
+
+        self._config_path = get_default_config_path()
+        self._config: AppConfig = load_config(self._config_path)
+
+        # Metadata-only assembly/result in GUI process; real OCCT shapes live in worker process
+        self._assembly: Optional[AssemblyModel] = None
+        self._result: Optional[SimplifyResult] = None
+        self._temp_preview_dir = Path(tempfile.mkdtemp(prefix="simple_3d_step_preview_"))
+
+        # Separate OS process for GIL-free OCCT / Embree execution
+        self._worker = CadWorkerClient()
+        self._busy = False
+        self._active_cmd_id: Optional[int] = None
+        self._active_task_name: str = ""
+        self._active_on_success: Optional[Callable[[Any], None]] = None
+        self._pending_initial_step: Optional[Path] = (
+            initial_step if (initial_step and initial_step.exists()) else None
+        )
+
+        # Right-hand parameter panel is hidden by default for a clean beginner-friendly UI
+        self._params_visible_var = tk.BooleanVar(value=False)
+
+        # Workflow step completion state ("idle" | "running" | "done")
+        self._step_states: dict[str, str] = {
+            "open": "idle",
+            "analyze": "idle",
+            "simplify": "idle",
+            "save": "idle",
+        }
+        self._step_buttons: dict[str, tuple[tk.Button, str]] = {}
+        self._step_borders: dict[str, tk.Frame] = {}
+        self._active_step_key: Optional[str] = None
+        self._active_step_prev_state: str = "idle"
+
+        apply_modern_flat_theme(self)
+        self._build_layout()
+        self._bind_shortcuts()
+        self._update_ui_state()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(40, self._poll_worker)
+
+        viewer_info = self._config.viewer_executable or "(Windows 기본 연결 프로그램)"
+        self._log_panel.append_log(f"설정 로드 완료: {self._config_path}")
+        self._log_panel.append_log(f"외부 3D 뷰어: {viewer_info}")
+        self._log_panel.append_log("백그라운드 CAD 전용 프로세스 시작 중 (GUI 프리징 방지 모드)...")
+
+    def _bind_shortcuts(self) -> None:
+        self.bind_all("<Control-o>", lambda _e: self._on_open_step())
+        self.bind_all("<Control-s>", lambda _e: self._on_save_result())
+
+    def _make_step_button(
+        self,
+        parent: tk.Misc,
+        step_key: str,
+        label: str,
+        command: Callable[[], None],
+    ) -> tuple[tk.Frame, tk.Button]:
+        """Create a crisp 1px-bordered Modern Flat workflow step button with hover feedback."""
+        border_wrap = tk.Frame(parent, background=STEP_STYLES["idle"]["border"], padx=1, pady=1)
+        btn = tk.Button(
+            border_wrap,
+            text=label,
+            command=command,
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=11,
+            pady=5,
+            cursor="hand2",
+            disabledforeground=COLORS["text_muted"],
+            font=FONTS["base"],
+        )
+        btn.pack(fill=tk.BOTH, expand=True)
+
+        def _on_enter(_e: tk.Event) -> None:
+            if str(btn.cget("state")) == tk.NORMAL:
+                spec = STEP_STYLES[self._step_states[step_key]]
+                btn.configure(background=spec["hover_bg"])
+
+        def _on_leave(_e: tk.Event) -> None:
+            spec = STEP_STYLES[self._step_states[step_key]]
+            btn.configure(background=spec["bg"])
+
+        btn.bind("<Enter>", _on_enter)
+        btn.bind("<Leave>", _on_leave)
+
+        self._step_buttons[step_key] = (btn, label)
+        self._step_borders[step_key] = border_wrap
+        self._apply_step_style(step_key, "idle")
+        return border_wrap, btn
+
+    def _apply_step_style(self, step_key: str, state: str) -> None:
+        self._step_states[step_key] = state
+        entry = self._step_buttons.get(step_key)
+        if entry is None:
+            return
+        btn, base_label = entry
+        spec = STEP_STYLES[state]
+        btn.configure(
+            text=f"{spec['prefix']}{base_label}",
+            background=spec["bg"],
+            foreground=spec["fg"],
+            activebackground=spec["hover_bg"],
+            activeforeground=spec["fg"],
+            font=spec["font"],
+        )
+        border_wrap = self._step_borders.get(step_key)
+        if border_wrap is not None:
+            border_wrap.configure(background=spec["border"])
+
+    def _reset_steps_from(self, step_keys: tuple[str, ...]) -> None:
+        for key in step_keys:
+            self._apply_step_style(key, "idle")
+
+    def _build_layout(self) -> None:
+        # 1. Elevated white top header card split cleanly into 2 compact rows for large fonts
+        header_card = tk.Frame(self, background=COLORS["surface"])
+        header_card.pack(side=tk.TOP, fill=tk.X)
+
+        # Row 1: Primary 4-step workflow buttons
+        self._toolbar_row1 = tk.Frame(header_card, background=COLORS["surface"])
+        self._toolbar_row1.pack(fill=tk.X, padx=10, pady=(7, 4))
+
+        def _add_chevron() -> None:
+            tk.Label(
+                self._toolbar_row1,
+                text="›",
+                background=COLORS["surface"],
+                foreground=COLORS["text_muted"],
+                font=("Segoe UI", 16),
+                padx=4,
+            ).pack(side=tk.LEFT)
+
+        w_open, self._tb_open = self._make_step_button(
+            self._toolbar_row1, "open", "STEP 열기", self._on_open_step
+        )
+        w_open.pack(side=tk.LEFT)
+        _add_chevron()
+
+        w_analyze, self._tb_analyze = self._make_step_button(
+            self._toolbar_row1, "analyze", "1. 내부 부품 분석", self._on_analyze
+        )
+        w_analyze.pack(side=tk.LEFT)
+        _add_chevron()
+
+        w_simplify, self._tb_simplify = self._make_step_button(
+            self._toolbar_row1, "simplify", "2. 단일 Solid 변환", self._on_simplify
+        )
+        w_simplify.pack(side=tk.LEFT)
+        _add_chevron()
+
+        w_save, self._tb_save = self._make_step_button(
+            self._toolbar_row1, "save", "결과 저장", self._on_save_result
+        )
+        w_save.pack(side=tk.LEFT)
+
+        # Row 2: External 3D viewer actions (left) + [파라미터] toggle & [뷰어 설정] (right)
+        self._toolbar_row2 = tk.Frame(header_card, background=COLORS["surface"])
+        self._toolbar_row2.pack(fill=tk.X, padx=10, pady=(2, 7))
+
+        self._tb_view_orig = ttk.Button(
+            self._toolbar_row2, text="원본 뷰어", style="Toolbar.TButton", command=self._on_view_original
+        )
+        self._tb_view_orig.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._tb_view_kept = ttk.Button(
+            self._toolbar_row2, text="유지 부품 미리보기", style="Toolbar.TButton", command=self._on_view_kept_parts
+        )
+        self._tb_view_kept.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._tb_view_res = ttk.Button(
+            self._toolbar_row2, text="결과 뷰어", style="Toolbar.TButton", command=self._on_view_result
+        )
+        self._tb_view_res.pack(side=tk.LEFT)
+
+        # Right side: [파라미터] toggle button directly to the left of [뷰어 설정]
+        ttk.Button(
+            self._toolbar_row2, text="뷰어 설정", style="Toolbar.TButton", command=self._on_open_settings
+        ).pack(side=tk.RIGHT)
+
+        self._tb_params = ttk.Checkbutton(
+            self._toolbar_row2,
+            text="파라미터",
+            style="Toolbar.Toolbutton",
+            variable=self._params_visible_var,
+            command=self._toggle_params_panel,
+        )
+        self._tb_params.pack(side=tk.RIGHT, padx=(0, 6))
+
+        tk.Frame(header_card, height=1, background=COLORS["border"]).pack(fill=tk.X)
+
+        # 2. Clean file & result summary status strip
+        self._file_var = tk.StringVar(value="열린 파일 없음 — 상단 [STEP 열기] 버튼으로 파일을 선택하세요.")
+        self._result_badge_var = tk.StringVar(value="")
+
+        self._info_bar = tk.Frame(self, background=COLORS["surface_alt"], padx=12, pady=5)
+        self._info_bar.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(
+            self._info_bar,
+            textvariable=self._file_var,
+            background=COLORS["surface_alt"],
+            foreground=COLORS["text_secondary"],
+            font=FONTS["small_bold"],
+        ).pack(side=tk.LEFT)
+
+        self._result_badge = tk.Label(
+            self._info_bar,
+            textvariable=self._result_badge_var,
+            background=COLORS["surface_alt"],
+            foreground=COLORS["success_text"],
+            font=FONTS["small_bold"],
+            padx=8,
+            pady=1,
+        )
+        self._result_badge.pack(side=tk.RIGHT)
+
+        tk.Frame(self, height=1, background=COLORS["border"]).pack(side=tk.TOP, fill=tk.X)
+
+        # 3. Bottom Log & Progress drawer — packed BEFORE main_pane so it is NEVER clipped
+        self._log_panel = LogPanel(self, on_cancel=self._on_cancel_task)
+        self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
+
+        # Dynamic animated busy banner (packed above main_pane only while busy)
+        self._busy_banner = BusyBanner(
+            self,
+            on_cancel=self._on_cancel_task,
+            on_force_cancel=self._on_force_cancel_task,
+        )
+
+        # 4. Main PanedWindow packed LAST with expand=True so it absorbs all remaining space
+        self._main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        self._main_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 4))
+
+        self._part_tree = PartTreePanel(
+            self._main_pane, on_selection_changed=self._on_part_selection_modified
+        )
+        self._control_panel = ControlPanel(
+            self._main_pane,
+            app_config=self._config,
+            on_analyze=self._on_analyze,
+            on_simplify=self._on_simplify,
+            on_save_result=self._on_save_result,
+            on_open_result_viewer=self._on_view_result,
+        )
+
+        # Only show PartTree by default; ControlPanel is toggled via [파라미터] button
+        self._main_pane.add(self._part_tree, weight=3)
+
+    def _toggle_params_panel(self) -> None:
+        show = bool(self._params_visible_var.get())
+        panes = self._main_pane.panes()
+        ctrl_id = str(self._control_panel)
+        if show and ctrl_id not in panes:
+            self._main_pane.add(self._control_panel, weight=1)
+        elif not show and ctrl_id in panes:
+            self._main_pane.forget(self._control_panel)
+
+    def _set_result_badge(self, text: str, is_ok: bool = True) -> None:
+        self._result_badge_var.set(text)
+        if not text:
+            self._result_badge.configure(
+                background=COLORS["surface_alt"], foreground=COLORS["success_text"]
+            )
+        elif is_ok:
+            self._result_badge.configure(
+                background=COLORS["success_soft"], foreground=COLORS["success_text"]
+            )
+        else:
+            self._result_badge.configure(
+                background=COLORS["warning_soft"], foreground=COLORS["warning_text"]
+            )
+
+    def _update_ui_state(self) -> None:
+        has_asm = self._assembly is not None and len(self._assembly.parts) > 0
+        has_res = self._result is not None
+        busy = self._busy
+
+        self._tb_open.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self._tb_analyze.configure(state=tk.NORMAL if (has_asm and not busy) else tk.DISABLED)
+        self._tb_simplify.configure(state=tk.NORMAL if (has_asm and not busy) else tk.DISABLED)
+        self._tb_save.configure(state=tk.NORMAL if (has_res and not busy) else tk.DISABLED)
+        self._tb_view_orig.configure(state=tk.NORMAL if (has_asm and not busy) else tk.DISABLED)
+        self._tb_view_kept.configure(state=tk.NORMAL if (has_asm and not busy) else tk.DISABLED)
+        self._tb_view_res.configure(state=tk.NORMAL if (has_res and not busy) else tk.DISABLED)
+
+        self._control_panel.set_controls_state(has_asm, has_res, busy)
+        self._log_panel.set_busy(busy)
+
+    def _show_busy_banner(self, task_name: str) -> None:
+        self._busy_banner.start(task_name)
+        if not self._busy_banner.winfo_ismapped():
+            self._busy_banner.pack(
+                side=tk.TOP, fill=tk.X, padx=10, pady=(8, 0), before=self._main_pane
+            )
+
+    def _hide_busy_banner(self) -> None:
+        self._busy_banner.stop()
+        if self._busy_banner.winfo_ismapped():
+            self._busy_banner.pack_forget()
+        self.title(BASE_TITLE)
+
+    # --- Subprocess Background Orchestration ---
+
+    def _collect_overrides(self) -> dict[int, tuple[bool, bool]]:
+        if self._assembly is None:
+            return {}
+        return {p.part_id: (p.keep, p.user_overridden) for p in self._assembly.parts}
+
+    def _on_part_selection_modified(self) -> None:
+        if self._step_states["simplify"] == "done" or self._step_states["save"] == "done":
+            self._reset_steps_from(("simplify", "save"))
+
+    def _submit_worker_task(
+        self,
+        task_name: str,
+        cmd_name: str,
+        payload: dict[str, Any],
+        on_success: Callable[[Any], None],
+        step_key: Optional[str] = None,
+    ) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._active_task_name = task_name
+        self._active_on_success = on_success
+        self._active_step_key = step_key
+        if step_key is not None:
+            self._active_step_prev_state = self._step_states.get(step_key, "idle")
+            self._apply_step_style(step_key, "running")
+        self._active_cmd_id = self._worker.submit(cmd_name, payload)
+
+        self._show_busy_banner(task_name)
+        self._log_panel.set_progress(0.0, f"{task_name} 진행 중...")
+        self._log_panel.append_log(f"▶ {task_name} 시작 (백그라운드 CAD 프로세스)")
+        self._update_ui_state()
+
+    def _on_cancel_task(self) -> None:
+        if not self._busy:
+            return
+        self._worker.request_cancel()
+        self._busy_banner.mark_cancelling()
+        self._log_panel.append_log(
+            "취소 요청 전송됨 — 현재 C++ 연산 종료 대기 중 (즉시 중단하려면 상단 [강제 중단] 클릭)"
+        )
+
+    def _on_force_cancel_task(self) -> None:
+        if not self._busy:
+            return
+        task_name = self._active_task_name
+        self._worker.force_terminate_and_restart()
+        self._busy = False
+        self._active_cmd_id = None
+        self._active_on_success = None
+        self._active_step_key = None
+        self._hide_busy_banner()
+
+        self._assembly = None
+        self._result = None
+        self._part_tree.set_parts([])
+        self._control_panel.update_result(None)
+        self._set_result_badge("")
+        self._reset_steps_from(("open", "analyze", "simplify", "save"))
+        self._file_var.set("강제 중단으로 CAD 엔진이 재시작되었습니다 — STEP 파일을 다시 열어 주세요.")
+        self._log_panel.set_progress(0.0, f"{task_name} 강제 중단됨")
+        self._log_panel.append_log(
+            f"■ {task_name} 강제 중단 및 백그라운드 CAD 프로세스 재시작 완료"
+        )
+        self._update_ui_state()
+
+    def _poll_worker(self) -> None:
+        if self._busy:
+            self.title(
+                f"[작업 중 {self._busy_banner.elapsed_formatted}] {self._active_task_name} — SIMPLE 3D STEP"
+            )
+
+        for ev in self._worker.poll_events():
+            if ev.kind == "worker_ready":
+                self._log_panel.append_log("✔ 백그라운드 CAD 전용 프로세스 준비 완료")
+                if self._pending_initial_step is not None and not self._busy:
+                    path = self._pending_initial_step
+                    self._pending_initial_step = None
+                    self._load_step_file(path)
+
+            elif ev.kind == "progress":
+                cmd_id, frac, msg = ev.payload
+                if cmd_id == self._active_cmd_id:
+                    self._busy_banner.update_progress(frac, msg)
+                    self._log_panel.set_progress(frac, msg)
+
+            elif ev.kind == "done":
+                cmd_id, _cmd_name, res = ev.payload
+                if cmd_id != self._active_cmd_id:
+                    continue
+                task_name = self._active_task_name
+                cb = self._active_on_success
+                step_key = self._active_step_key
+                self._busy = False
+                self._active_cmd_id = None
+                self._active_on_success = None
+                self._active_step_key = None
+                self._hide_busy_banner()
+                self._log_panel.set_progress(1.0, f"{task_name} 완료")
+                self._log_panel.append_log(f"✔ {task_name} 완료")
+                if step_key is not None:
+                    self._apply_step_style(step_key, "done")
+                if cb:
+                    cb(res)
+                self._update_ui_state()
+
+            elif ev.kind == "cancelled":
+                cmd_id, _cmd_name, msg = ev.payload
+                if cmd_id != self._active_cmd_id:
+                    continue
+                task_name = self._active_task_name
+                step_key = self._active_step_key
+                prev_state = self._active_step_prev_state
+                self._busy = False
+                self._active_cmd_id = None
+                self._active_on_success = None
+                self._active_step_key = None
+                self._hide_busy_banner()
+                if step_key is not None:
+                    self._apply_step_style(step_key, prev_state)
+                self._log_panel.set_progress(0.0, f"{task_name} 취소됨")
+                self._log_panel.append_log(f"■ {task_name} 취소됨: {msg}")
+                self._update_ui_state()
+
+            elif ev.kind in ("error", "crashed"):
+                cmd_id = ev.payload[0]
+                if cmd_id != self._active_cmd_id:
+                    continue
+                task_name = self._active_task_name
+                err_msg = ev.payload[2]
+                step_key = self._active_step_key
+                prev_state = self._active_step_prev_state
+                self._busy = False
+                self._active_cmd_id = None
+                self._active_on_success = None
+                self._active_step_key = None
+                self._hide_busy_banner()
+                if ev.kind == "crashed":
+                    self._reset_steps_from(("open", "analyze", "simplify", "save"))
+                elif step_key is not None:
+                    self._apply_step_style(step_key, prev_state)
+                self._log_panel.set_progress(0.0, f"{task_name} 오류 발생")
+                self._log_panel.append_log(f"✖ {task_name} 실패: {err_msg}")
+                if ev.kind == "crashed":
+                    self._assembly = None
+                    self._result = None
+                    self._part_tree.set_parts([])
+                    self._control_panel.update_result(None)
+                    self._set_result_badge("")
+                self._update_ui_state()
+                messagebox.showerror(f"{task_name} 오류", err_msg, parent=self)
+
+        self.after(40, self._poll_worker)
+
+    # --- Actions ---
+
+    def _on_open_step(self) -> None:
+        if self._busy:
+            return
+        init_dir = self._config.last_open_dir or str(Path.cwd())
+        if not Path(init_dir).exists():
+            init_dir = str(Path.cwd())
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title="3D STEP 파일 열기",
+            initialdir=init_dir,
+            filetypes=[("STEP 파일", "*.step;*.stp;*.STEP;*.STP"), ("모든 파일", "*.*")],
+        )
+        if selected:
+            path = Path(selected)
+            self._config.last_open_dir = str(path.parent)
+            save_config(self._config, self._config_path)
+            self._load_step_file(path)
+
+    def _load_step_file(self, path: Path) -> None:
+        def _done(data: dict[str, Any]) -> None:
+            src = Path(data["source_path"])
+            asm = AssemblyModel(
+                source_path=src,
+                parts=data["parts"],
+                unit=data["unit"],
+                bbox_min=np.asarray(data["bbox_min"], dtype=np.float64),
+                bbox_max=np.asarray(data["bbox_max"], dtype=np.float64),
+                raw_shape=None,
+            )
+            self._assembly = asm
+            self._result = None
+            self._part_tree.set_parts(asm.parts)
+            self._control_panel.update_result(None)
+            self._set_result_badge("")
+            self._reset_steps_from(("analyze", "simplify", "save"))
+            sz = asm.bbox_max - asm.bbox_min
+            size_mb = src.stat().st_size / (1024 * 1024)
+            self._file_var.set(
+                f"파일: {src.name} ({size_mb:.2f} MB)  ·  부품 {len(asm.parts)}개  ·  "
+                f"크기 {sz[0]:.1f} × {sz[1]:.1f} × {sz[2]:.1f} {asm.unit}"
+            )
+            self._log_panel.append_log(
+                f"STEP 로드: {src.name} — 부품 {len(asm.parts)}개, 총 부피 {data['total_volume']:,.1f} mm³"
+            )
+
+        self._submit_worker_task(
+            f"STEP 로드 ({path.name})",
+            "load_step",
+            {"path": str(path)},
+            _done,
+            step_key="open",
+        )
+
+    def _on_analyze(self) -> None:
+        if self._assembly is None or self._busy:
+            return
+        vis_cfg = self._control_panel.build_visibility_config()
+        self._control_panel.sync_to_app_config(self._config)
+        save_config(self._config, self._config_path)
+
+        def _done(data: dict[str, Any]) -> None:
+            if self._assembly is not None:
+                self._assembly.parts = data["parts"]
+                self._part_tree.set_parts(self._assembly.parts)
+            self._reset_steps_from(("simplify", "save"))
+            self._log_panel.append_log(
+                f"가시성 분석 결과: 외부 유지 {data['external_count']}개 / "
+                f"내부 자동 삭제 {data['internal_count']}개 "
+                f"(삼각형 {data['tri_count']:,}개)"
+            )
+
+        self._submit_worker_task(
+            "내부 부품 가시성 분석",
+            "analyze_visibility",
+            {"config": vis_cfg, "overrides": self._collect_overrides()},
+            _done,
+            step_key="analyze",
+        )
+
+    def _on_simplify(self) -> None:
+        if self._assembly is None or self._busy:
+            return
+        kept_cnt = sum(1 for p in self._assembly.parts if p.keep)
+        if kept_cnt == 0:
+            messagebox.showwarning("부품 없음", "유지할 외관 부품을 최소 1개 이상 선택해 주세요.", parent=self)
+            return
+
+        simp_cfg = self._control_panel.build_simplify_config()
+        self._control_panel.sync_to_app_config(self._config)
+        save_config(self._config, self._config_path)
+
+        def _done(res: SimplifyResult) -> None:
+            self._result = res
+            self._control_panel.update_result(res)
+            self._reset_steps_from(("save",))
+            v = res.validation
+            status_mark = "✔" if v.is_valid else "⚠"
+            self._set_result_badge(
+                f"{status_mark} Solid {v.solid_count} / Shell {v.shell_count} · "
+                f"{v.face_count:,}면 · 채움 +{res.filled_volume_delta:,.0f} mm³",
+                is_ok=v.is_valid,
+            )
+            for line in res.logs:
+                self._log_panel.append_log(f"  · {line}")
+            self._log_panel.append_log(
+                f"검증 요약: Solid={v.solid_count}, Shell={v.shell_count}, "
+                f"Watertight={v.is_watertight}, 부피={v.volume:,.1f} mm³ "
+                f"(내부 채움 +{res.filled_volume_delta:,.1f} mm³)"
+            )
+
+        self._submit_worker_task(
+            "정밀 B-Rep 단일 Solid 변환",
+            "simplify",
+            {"config": simp_cfg, "overrides": self._collect_overrides()},
+            _done,
+            step_key="simplify",
+        )
+
+    def _on_save_result(self) -> None:
+        if self._result is None or self._busy or self._assembly is None:
+            return
+        init_dir = str(self._assembly.source_path.parent)
+        default_name = f"{self._assembly.source_path.stem}_simplified.step"
+        selected = filedialog.asksaveasfilename(
+            parent=self,
+            title="단순화 STEP 파일 저장",
+            initialdir=init_dir,
+            initialfile=default_name,
+            defaultextension=".step",
+            filetypes=[("STEP 파일", "*.step;*.stp"), ("모든 파일", "*.*")],
+        )
+        if not selected:
+            return
+
+        out_path = Path(selected)
+        self._config.last_save_dir = str(out_path.parent)
+        save_config(self._config, self._config_path)
+        schema = self._control_panel.build_simplify_config().step_schema
+
+        def _done(data: dict[str, Any]) -> None:
+            saved_path = Path(data["output_path"])
+            if self._result is not None:
+                self._result.output_path = saved_path
+            size_mb = data["size_bytes"] / (1024 * 1024)
+            self._log_panel.append_log(f"STEP 저장 완료: {saved_path} ({size_mb:.2f} MB)")
+            messagebox.showinfo(
+                "저장 완료",
+                f"단순화 STEP 파일이 저장되었습니다.\n\n{saved_path}\n({size_mb:.2f} MB)",
+                parent=self,
+            )
+
+        self._submit_worker_task(
+            f"STEP 저장 ({out_path.name})",
+            "save_result",
+            {"output_path": str(out_path), "schema": schema},
+            _done,
+            step_key="save",
+        )
+
+    # --- External 3D Viewer Actions ---
+
+    def _launch_viewer_safe(self, step_path: Path) -> None:
+        try:
+            msg = launch_external_viewer(step_path, self._config)
+            self._log_panel.append_log(msg)
+        except Exception as exc:
+            messagebox.showerror("외부 3D 뷰어 실행 실패", str(exc), parent=self)
+
+    def _on_view_original(self) -> None:
+        if self._assembly is None:
+            return
+        self._launch_viewer_safe(self._assembly.source_path)
+
+    def _on_view_kept_parts(self) -> None:
+        if self._assembly is None or self._busy:
+            return
+        kept = [p for p in self._assembly.parts if p.keep]
+        if not kept:
+            messagebox.showwarning("미리보기 불가", "유지 선택된 부품이 없습니다.", parent=self)
+            return
+
+        preview_path = (
+            self._temp_preview_dir / f"{self._assembly.source_path.stem}_kept_preview.step"
+        )
+        schema = self._control_panel.build_simplify_config().step_schema
+
+        def _done(data: dict[str, Any]) -> None:
+            self._launch_viewer_safe(Path(data["output_path"]))
+
+        self._submit_worker_task(
+            "유지 부품 외부 뷰어 미리보기 준비",
+            "export_kept_preview",
+            {
+                "output_path": str(preview_path),
+                "schema": schema,
+                "overrides": self._collect_overrides(),
+            },
+            _done,
+        )
+
+    def _on_view_result(self) -> None:
+        if self._result is None or self._busy or self._assembly is None:
+            return
+        if self._result.output_path and self._result.output_path.exists():
+            self._launch_viewer_safe(self._result.output_path)
+            return
+
+        preview_path = (
+            self._temp_preview_dir / f"{self._assembly.source_path.stem}_result_preview.step"
+        )
+        schema = self._control_panel.build_simplify_config().step_schema
+
+        def _done(data: dict[str, Any]) -> None:
+            self._launch_viewer_safe(Path(data["output_path"]))
+
+        self._submit_worker_task(
+            "결과 외부 뷰어 열기 준비",
+            "export_result_preview",
+            {"output_path": str(preview_path), "schema": schema},
+            _done,
+        )
+
+    def _on_open_settings(self) -> None:
+        def _saved(updated: AppConfig) -> None:
+            self._config = updated
+            viewer = updated.viewer_executable or "(Windows 기본 연결 프로그램)"
+            self._log_panel.append_log(f"설정 저장 완료 — 외부 3D 뷰어: {viewer}")
+
+        SettingsDialog(self, self._config, self._config_path, on_saved=_saved)
+
+    def _on_close(self) -> None:
+        self._busy_banner.stop()
+        self._control_panel.sync_to_app_config(self._config)
+        save_config(self._config, self._config_path)
+        self._worker.shutdown()
+        self.destroy()

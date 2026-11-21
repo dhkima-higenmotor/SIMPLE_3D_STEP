@@ -1,0 +1,30 @@
+[project]
+name = "simple-3d-step"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "dhkima", email = "dhkima@higenrnm.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "cadquery-ocp-novtk>=8.0.1.1.0",
+    "embreex>=4.4.0.post1",
+    "numpy>=2.5.5",
+    "rtree>=1.4.1",
+    "scikit-image>=0.26.0",
+    "scipy>=1.18.1",
+    "trimesh>=5.2.1",
+]
+
+[project.scripts]
+simple-3d-step = "simple_3d_step:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
