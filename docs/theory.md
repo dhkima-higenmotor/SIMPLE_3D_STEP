@@ -41,20 +41,31 @@ enclosed interior so cross-sections show solid material.**
 The implementation is a deterministic sequence of stages:
 
 ```mermaid
-flowchart LR
-    A[STEP file] --> B[XCAF parse<br/>leaf solids]
-    B --> C[Tessellate<br/>part/face mapping]
-    C --> D[Pass 1<br/>outside-in rays]
-    D --> E[Pass 2<br/>inside-out escape]
-    E --> F[Classify<br/>keep / drop]
-    F --> G[Heal kept solids]
-    G --> H[Analytic interior core]
-    H --> I[Two-tier exact fuse]
-    I --> J[Void shell purge]
-    J --> K[Island bridging]
-    K --> L[UnifySameDomain]
-    L --> M[STEP normalization]
-    M --> N[Validate + write STEP]
+flowchart TB
+    subgraph S1["1. Input & Visibility Rays"]
+        direction LR
+        A["STEP file"] --> B["XCAF parse<br/>leaf solids"]
+        B --> C["Tessellate<br/>part/face mapping"]
+        C --> D["Pass 1<br/>outside-in rays"]
+        D --> E["Pass 2<br/>inside-out escape"]
+    end
+
+    subgraph S2["2. Classification & Solidification"]
+        direction LR
+        F["Classify<br/>keep / drop"] --> G["Heal kept solids"]
+        G --> H["Analytic interior core"]
+        H --> I["Two-tier exact fuse"]
+        I --> J["Void shell purge"]
+    end
+
+    subgraph S3["3. Cleanup & STEP Export"]
+        direction LR
+        K["Island bridging"] --> L["UnifySameDomain"]
+        L --> M["STEP normalization"]
+        M --> N["Validate + write STEP"]
+    end
+
+    S1 --> S2 --> S3
 ```
 
 | Stage | Entry point | Progress band |

@@ -40,20 +40,31 @@ $\operatorname{interior}$ 는 둘러싸인 재료 부피를 뜻합니다. 즉 **
 구현은 다음과 같은 결정론적 단계로 진행됩니다.
 
 ```mermaid
-flowchart LR
-    A[STEP 파일] --> B[XCAF 파싱<br/>리프 솔리드]
-    B --> C[테셀레이션<br/>부품/면 매핑]
-    C --> D[Pass 1<br/>외부→내부 광선]
-    D --> E[Pass 2<br/>내부→외부 탈출 검사]
-    E --> F[분류<br/>Keep / Drop]
-    F --> G[유지 솔리드 힐링]
-    G --> H[해석적 내부 코어]
-    H --> I[2계층 정밀 Fuse]
-    I --> J[공동 껍질 소거]
-    J --> K[아일랜드 브리지]
-    K --> L[UnifySameDomain]
-    L --> M[STEP 정규화]
-    M --> N[검증 + STEP 저장]
+flowchart TB
+    subgraph S1["1. 입력 및 가시성 광선 분석"]
+        direction LR
+        A["STEP 파일"] --> B["XCAF 파싱<br/>리프 솔리드"]
+        B --> C["테셀레이션<br/>부품/면 매핑"]
+        C --> D["Pass 1<br/>외부→내부 광선"]
+        D --> E["Pass 2<br/>내부→외부 탈출 검사"]
+    end
+
+    subgraph S2["2. 분류 및 정밀 솔리드화"]
+        direction LR
+        F["분류<br/>Keep / Drop"] --> G["유지 솔리드 힐링"]
+        G --> H["해석적 내부 코어"]
+        H --> I["2계층 정밀 Fuse"]
+        I --> J["공동 껍질 소거"]
+    end
+
+    subgraph S3["3. 후처리 및 STEP 내보내기"]
+        direction LR
+        K["아일랜드 브리지"] --> L["UnifySameDomain"]
+        L --> M["STEP 정규화"]
+        M --> N["검증 + STEP 저장"]
+    end
+
+    S1 --> S2 --> S3
 ```
 
 | 단계 | 진입점 | 진행 구간 |
