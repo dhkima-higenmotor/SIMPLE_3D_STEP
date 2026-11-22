@@ -24,13 +24,13 @@
 
 $N$ 개의 솔리드(하우징, 커버, 로터, 기어, 베어링, PCB, 체결부품)로 이루어진
 어셈블리 $\Omega=\bigcup_{i=1}^{N}\Omega_i$ 가 주어졌을 때, 목표는 다음을 만족하는
-단일 폐합 솔리드 $\Omega^{*}$ 를 만드는 것입니다.
+단일 폐합 솔리드 $\Omega^{\ast}$ 를 만드는 것입니다.
 
-$$
-\partial\Omega^{*} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
+```math
+\partial\Omega^{\ast} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
 \qquad
-\operatorname{interior}(\Omega^{*}) \;\supset\; \operatorname{interior}(\Omega),
-$$
+\operatorname{interior}(\Omega^{\ast}) \;\supset\; \operatorname{interior}(\Omega),
+```
 
 여기서 $\Omega_{\text{ext}}$ 는 *외부에서 보이는* 부품들의 합집합이고,
 $\operatorname{interior}$ 는 둘러싸인 재료 부피를 뜻합니다. 즉 **외관 B-Rep 곡면은
@@ -70,7 +70,7 @@ flowchart LR
 
 아래에서 사용하는 기호는 다음과 같습니다. $D$ 는 어셈블리 바운딩 박스의 대각선,
 $D_i$ 는 개별 부품의 대각선, $A_i$ 는 부품의 B-Rep 표면적, $T$ 는 삼각형 수,
-$\tau$ 는 최소 가시 비율($\tau = \texttt{min\_visible\_ratio\_pct}/100$)입니다.
+$\tau$ 는 최소 가시 비율(`min_visible_ratio_pct / 100`)입니다.
 
 ---
 
@@ -82,25 +82,25 @@ STEP AP214/AP242 어셈블리는 XCAF 문서로 읽힙니다. 이 문서는 제�
 인스턴스(참조), 하위 형상으로 이루어진 **라벨 그래프**입니다. 각 인스턴스 라벨은
 `TopLoc_Location`, 즉 강체 변환을 가집니다.
 
-$$
+```math
 T = \begin{bmatrix} R & \mathbf{t} \\ \mathbf{0}^\top & 1 \end{bmatrix},
 \qquad R \in SO(3),\; \mathbf{t}\in\mathbb{R}^3 .
-$$
+```
 
 루트 제품 $p_0$ 에서 자식 인스턴스 $p_1,\dots,p_k$ 로 내려가며 전역 배치를 합성합니다.
 
-$$
+```math
 T_{\text{global}} = T_{p_0}\,T_{p_1}\cdots T_{p_k},
 \qquad \mathbf{x}_{\text{world}} = T_{\text{global}}\,\mathbf{x}_{\text{local}} .
-$$
+```
 
 참조 라벨은 재귀적으로 해석되므로(`XCAFDoc_ShapeTool.IsReference_s` +
 `GetReferredShape_s`), 동일 부품이 여러 번 인스턴싱되어도 하나의 형상과 $k$ 개의
 배치만 남습니다. 그다음 **리프 솔리드와 자유 껍질**을 추출합니다.
 
-$$
+```math
 \partial\Omega_i = \text{solids}(\text{shape}) \;\cup\; \text{shells}(\text{shape})\setminus \text{solids},
-$$
+```
 
 다중 바디 부품은 `[Body k]` 리프로 분할됩니다. 이 정규화 덕분에 이후 파이프라인은
 형상 종류와 무관하게 동작합니다. 즉 하위 단계 전체가 전역 배치가 적용된
@@ -112,10 +112,10 @@ $$
 
 - **부피** — $\nabla\cdot\mathbf{x}=3$ 에 대한 발산 정리:
 
-$$
-V = \int_{\Omega} dV
-  = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
-$$
+  ```math
+  V = \int_{\Omega} dV
+    = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
+  ```
 
   메쉬가 아니라 B-Rep 면(평면, 원통, NURBS 등)에서 해석적으로 계산됩니다.
 - **표면적** $A=\int_{\partial\Omega} dA$.
@@ -145,13 +145,13 @@ $$
 `BRepMesh_IncrementalMesh` 가 어셈블리 크기에서 유도한 선형 편차와 소형 부품용
 개별 상한으로 각 부품을 테셀레이션합니다.
 
-$$
+```math
 \delta_L = \max\!\left(0.05,\; 0.0025\,D\right),
 \qquad
 \delta_i = \min\!\left(\delta_L,\; \max\!\left(0.02,\; 0.02\,D_i\right)\right),
 \qquad
 \alpha = 0.5\ \text{rad}.
-$$
+```
 
 OCCT 의 Python 바인딩(OCP)은 C++ 호출 동안 Python GIL 을 점유하는 반면,
 `BRepMesh_IncrementalMesh(..., theInParallel=True)` 는 단일 호출 내부의 모든 면을
@@ -159,11 +159,11 @@ OCCT 네이티브 C++ 스레드 풀(`OSD_Parallel`)에 분배합니다. 따라�
 메싱하면 소형 부품에서 멀티코어 CPU 가 유휴 상태가 됩니다. 구현은 부품을 로그 편차
 버킷으로 묶어(`mesh_shapes_in_parallel_buckets`)
 
-$$
+```math
 b_i = \left\lfloor \frac{\ln \delta_i}{\ln 1.5} \right\rfloor,
 \qquad
 \delta_{\text{bucket}}(b) = \min_{i:\, b_i = b} \delta_i ,
-$$
+```
 
 버킷별 `TopoDS_Compound` 를 구성하고 가장 조밀한 버킷부터 일괄 메싱하므로, 모든 면이
 항상 $\delta_i$ 이하의 편차 정밀도를 보장받으면서 전체 C++ 스레드를 포화시킵니다.
@@ -172,12 +172,12 @@ $$
 
 삼각형은 단일 전역 버퍼에 병렬 배열과 함께 추가됩니다.
 
-$$
+```math
 \texttt{tri\_part\_id}[t],\quad \texttt{tri\_face\_id}[t],\quad
-a_t = \tfrac12\left\|(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)\right\|,
+a_t = \tfrac{1}{2}\left\|(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)\right\|,
 \quad
 \hat{\mathbf{n}}_t = \frac{(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)}{\left\|\cdot\right\|}.
-$$
+```
 
 `TopAbs_REVERSED` 면은 감기를 뒤집어 $\hat{\mathbf{n}}_t$ 가 항상 바깥을 향하도록
 보정하고, `trimesh.Trimesh` 는 `process=False` 로 생성해 삼각형 인덱스가 **병합되거나
@@ -189,13 +189,13 @@ $$
 ### 3.2 Fibonacci 구면 시점
 
 시점 방향은 $S^2$ 위의 Fibonacci(황금각) 나선입니다. $i=0,\dots,n-1$ 와
-$u_i=(i+\tfrac12)/n$ 에 대해
+$u_i=(i+\tfrac{1}{2})/n$ 에 대해
 
-$$
+```math
 z_i = 1-2u_i,\qquad
 \theta_i = \pi\left(1+\sqrt{5}\right)u_i,\qquad
 \mathbf{v}_i = \left(\sqrt{1-z_i^2}\cos\theta_i,\ \sqrt{1-z_i^2}\sin\theta_i,\ z_i\right).
-$$
+```
 
 $z$ 가 균일하므로 각 셀의 면적이 $4\pi/n$ 으로 같고, 황금각 증분 덕분에 연속 샘플이
 서로 멀리 떨어집니다. 따라서 위도/경도 격자처럼 극점에 샘플이 몰리지 않으면서 적은
@@ -207,37 +207,37 @@ $n$ 으로 구면을 고르게 덮을 수 있습니다. 프리셋은 **Fast 26**
 시점 $i$ 에서 카메라는 $\mathbf{d}_i=-\mathbf{v}_i$ 방향을 바라보며, 위치는 다음과
 같습니다.
 
-$$
+```math
 \mathbf{o}_i = \mathbf{c} + R\,\mathbf{v}_i,\qquad
 R = 0.525\,D,\qquad
-\mathbf{c}=\tfrac12(\mathbf{b}_{\min}+\mathbf{b}_{\max}).
-$$
+\mathbf{c}=\tfrac{1}{2}(\mathbf{b}_{\min}+\mathbf{b}_{\max}).
+```
 
 $m\times m$ 샘플의 정사각 격자가 시점 평면의 $[-R,R]^2$ 를 덮고, 간격은
 $s=2R/(m-1)$ 이며, 내접 원판으로 제한합니다.
 
-$$
+```math
 u_j^2+v_j^2 \le 1.04\,R^2
-$$
+```
 
 (제한하지 않으면 모서리 광선의 약 21 % 가 낭비됩니다.) 각 시점은 황금비 기반
 서브픽셀 지터로 오프셋됩니다.
 
-$$
-j_x^{(i)} = \left(\left\{\varphi\,i\right\}-\tfrac12\right)s,\qquad
-j_y^{(i)} = \left(\left\{\varphi^{-2}i\right\}-\tfrac12\right)s,\qquad
-\varphi=\frac{1+\sqrt5}{2},
-$$
+```math
+j_x^{(i)} = \left(\left\{\varphi\,i\right\}-\tfrac{1}{2}\right)s,\qquad
+j_y^{(i)} = \left(\left\{\varphi^{-2}i\right\}-\tfrac{1}{2}\right)s,\qquad
+\varphi=\frac{1+\sqrt{5}}{2},
+```
 
 이 지터는 시점별 샘플링 격자를 저불일치(low-discrepancy) 합집합으로 만들어 얇은 리브,
 방열핀, 볼트 머리의 체계적 앨리어싱을 막습니다.
 
 각 광선은 BVH(`trimesh` 광선 인터섹터, Intel Embree 기반)와 **첫 히트만** 교차합니다(`intersects_first`).
 
-$$
+```math
 h_t \in \{0,1\},\qquad
 H_i = \sum_{t\in \text{part } i} h_t .
-$$
+```
 
 `embreex` 는 `EmbreeScene.run()` 내부에서 단일 C++ 루프를 실행하되 Python GIL 을
 해제(`nogil`)하므로, 메인 스레드에서 BVH 를 1회 커밋한 뒤 시점들을 `ThreadPoolExecutor`
@@ -251,25 +251,25 @@ $$
 아주 작은 삼각형에 맞을 수도 있기 때문입니다. 이 추정기는 Cauchy 표면적 공식을
 사용합니다. 표면적 $A$ 인 물체를 무작위 방향에서 바라볼 때 **평균 투영 면적**은
 
-$$
+```math
 \overline{A_{\parallel}} = \frac{A}{4}
-$$
+```
 
 입니다. $n_v$ 개 시점에서 광선 한 개의 발자국(footprint)이 $s^2$ 이므로, 시점당
 샘플링된 투영 면적은 $H_i s^2 / n_v$ 입니다. 따라서
 
-$$
+```math
 \widehat{A}_{\text{vis},i} = \frac{4\,H_i\,s^2}{n_v}.
-$$
+```
 
 코드는 이 Cauchy 추정값과 히트된 삼각형들의 순수 면적 합 중 **보수적인 최솟값**을
 사용합니다.
 
-$$
+```math
 \widetilde{A}_i = \min\!\left(\sum_{t:\ h_t>0} a_t,\ \ \widehat{A}_{\text{vis},i}\right),
 \qquad
 \rho_i = \min\!\left(1,\ \frac{\widetilde{A}_i}{A_i}\right).
-$$
+```
 
 **왜 최솟값인가?** 히트된 삼각형의 면적 $a_t$ 를 모두 더하면 스치는(grazing) 삼각형을
 과대평가합니다. 광선 한 개가 50 mm² 짜리 면 전체를 노출된 것으로 표시할 수 있기
@@ -287,32 +287,32 @@ $\rho_i$ 가 작은 부품은 모호합니다. 숨은 내부 부품과, 작지�
 
 경계(borderline) 집합은 다음과 같습니다.
 
-$$
+```math
 B=\left\{\,i \;:\; \rho_i < \tau_2 \,\right\},
 \qquad
 \tau_2 = \max\!\left(2.5\,\tau,\ 0.025\right).
-$$
+```
 
 각 $i\in B$ 에 대해 $n_s=\min(48,\max(12,T_i))$ 개 삼각형을 **면적 비례**로
 샘플링하고($P(t)=a_t/A_i$), $K=32$ 개 반구 방향을 생성합니다.
-$z_j=(j+\tfrac12)/K$ 는 반구에서 균일한 면적 측도를 주며($z$ 와 $\theta$ 가 균일 →
+$z_j=(j+\tfrac{1}{2})/K$ 는 반구에서 균일한 면적 측도를 주며($z$ 와 $\theta$ 가 균일 →
 면적 요소 균일), 각 삼각형의 로컬 프레임 $(\mathbf{u},\mathbf{w},\hat{\mathbf{n}})$
 으로 회전시킵니다.
 
-$$
+```math
 \mathbf{r}_j = h_{x,j}\,\mathbf{u} + h_{y,j}\,\mathbf{w} + h_{z,j}\,\hat{\mathbf{n}},
 \qquad
 \mathbf{o}_j = \mathbf{c}_t + \epsilon\,\hat{\mathbf{n}},
 \qquad
 \epsilon=\max\!\left(2\times10^{-4}D,\ 0.01\right).
-$$
+```
 
 탈출 비율은 아무것도 맞지 않은 광선의 비율입니다.
 
-$$
+```math
 e_i = \frac{1}{n_s K}\sum_{s=1}^{n_s}\sum_{j=1}^{K}
 \mathbf{1}\!\left[\text{ray }(s,j)\text{ escapes}\right].
-$$
+```
 
 무작위 표면 샘플은 메인 스레드(`default_rng(42)`)에서 결정론적 순서로 먼저 생성한 뒤
 `intersects_any` 배치만 동일한 `ThreadPoolExecutor` 로 분배하므로, 스레드 수와 무관하게
@@ -322,7 +322,7 @@ $$
 
 가시성 점수는 두 패스를 합칩니다.
 
-$$
+```math
 v_i = \max\!\left(\rho_i,\ e_i\right),
 \qquad
 \text{status}(i)=
@@ -330,19 +330,19 @@ v_i = \max\!\left(\rho_i,\ e_i\right),
 \text{External (keep)} & v_i \ge \tau \ \text{and}\ V_i \ge V_{\min},\\[2pt]
 \text{Internal (drop)} & \text{otherwise}.
 \end{cases}
-$$
+```
 
-- $\tau = \texttt{min\_visible\_ratio\_pct}/100$ (기본 $0.005$ = 0.5 %).
+- $\tau$ = `min_visible_ratio_pct / 100` (기본 $0.005$ = 0.5 %).
 - $V_{\min}$ (`min_part_volume_mm3`)은 선택적 부피 하한이며 기본 비활성화입니다.
-- 사용자 오버라이드 $u_i$(부품 테이블에서 Keep/Drop 토글)는 항상 우선합니다.
+- 사용자 오버라이드 $u_i$ (부품 테이블에서 Keep/Drop 토글)는 항상 우선합니다.
   분류는 `auto_status` 만 갱신하고 `user_overridden` 이 설정된 경우 `keep` 은
   건드리지 않습니다.
 
 따라서 최종 B-Rep 목록은
 
-$$
+```math
 \text{kept} = \{\,i : \text{status}(i)=\text{External} \text{ or } u_i=\text{Keep}\,\}
-$$
+```
 
 입니다. 유지된 부품 중 히트되었거나(또는 Pass 2 에서 탈출한) B-Rep 면은
 `part_visible_faces` 로 기록되어 "보존을 약속한 외관"의 감사 추적이 됩니다.
@@ -368,18 +368,18 @@ $$
 $\mathbf{x}$, 바깥 법선 $\mathbf{n}$, 원통 축 $\mathbf{a}$, 축 위의 최근접점
 $\mathbf{x}_a$ 에 대해 다음을 만족하면 내부 홀입니다.
 
-$$
+```math
 \frac{\mathbf{x}_a-\mathbf{x}}{\left\|\mathbf{x}_a-\mathbf{x}\right\|}\cdot\mathbf{n} > 0,
-$$
+```
 
 즉 바깥 법선이 **축을 향해** 향합니다(재료가 보어 바깥에 있음). 반지름이
 $r\le d_{\max}/2$ 이면 `BRepAlgoAPI_Defeaturing` 으로 보어를 제거하고(최소 둘러싸인
 면적 $\pi r^2\cdot1.1$ 의 `ShapeUpgrade_RemoveInternalWires` 동반), 다음 가드를
 적용합니다.
 
-$$
+```math
 V' \ge 0.98\,V,
-$$
+```
 
 안정성을 위해 면이 $\le 250$ 개이고 홀 면이 $\le 16$ 개인 솔리드로 제한합니다. 이
 기능은 외관 형상을 의도적으로 변경하므로 기본적으로 꺼져 있습니다.
@@ -389,14 +389,14 @@ $$
 "재료를 더하는" 유일한 단계입니다. 패딩된 복셀 격자에서 계산하지만 결과는 **해석적**
 프리미티브(원통, 평면 프리즘)로 변환되며 복셀 면은 결코 출력되지 않습니다.
 
-**격자.** 최대 범위 $L_{\max}=D$ 와 해상도 $R$(`core_grid_resolution`, 기본 120,
+**격자.** 최대 범위 $L_{\max}=D$ 와 해상도 $R$ (`core_grid_resolution`, 기본 120,
 $[64,180]$ 으로 클램프)에 대해
 
-$$
+```math
 h = \frac{L_{\max}}{R},\qquad
 \text{pad}=\left\lceil g/h \right\rceil + 3,\qquad
 \text{dims} = \left\lceil \mathbf{e}/h \right\rceil + 2\,\text{pad} + 1,
-$$
+```
 
 여기서 $g$ 는 `core_bridge_gap_mm` 입니다.
 
@@ -406,16 +406,16 @@ $$
 Embree 스윕 3회를 4,096개 광선 타일로 나누어 `ThreadPoolExecutor` 로 병렬 실행하고
 표면 교차점을 포함하는 모든 복셀을 표시합니다(`multiple_hits=True`).
 
-$$
+```math
 O[i,j,k] = \mathbf{1}\!\left[\text{some ray hit voxel }(i,j,k)\right].
-$$
+```
 
 **밀폐 내부.** 공기는 $\neg O$ 이고, 외부 컴포넌트는 패딩된 모서리 복셀을 포함하는
 연결 요소입니다. 그러면
 
-$$
+```math
 \text{inside}_0 = \left\{\,x \in \neg O \;:\; \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
-$$
+```
 
 외부에서 도달할 수 없는 영역만 밀폐 공동으로 간주합니다. 따라서 개방형 관통홀이나
 슬롯은 공기가 경계와 연결되므로 **채워지지 않습니다**. 이것이 개방 창과 보어가 있어도
@@ -425,17 +425,17 @@ $$
 분의 1 mm 수준의 러닝 클리어런스로 떨어져 있는 경우가 많습니다.
 $r_c = g/h$ 에 대해
 
-$$
+```math
 D_O=\operatorname{EDT}(\neg O),\quad
 O_r = \left\{D_O \le r_c\right\},\quad
 \text{filled} = \left\{\,x \in \neg O_r : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\},
-$$
+```
 
-$$
+```math
 E = \left\{\,x : \operatorname{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
 \qquad
 \text{inside} = \left\{\,x \in \neg E : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
-$$
+```
 
 팽창 후 침식을 적용하면 복셀 단위에서 약 $2r_c$ 까지의 간극이 닫히면서 외곽 경계는
 유지됩니다. 이 닫힘 연산은 $r_c \ge 0.75$ 복셀(≈0.75 격자 피치)일 때만 적용되며, 그
@@ -445,9 +445,9 @@ $$
 
 **엄격한 내향 안전 여백.** $D_E=\operatorname{EDT}(E)$ 를 mm 단위로 두면
 
-$$
+```math
 C_{\text{safe}} = \left\{\,x \in \text{inside} \;:\; D_E(x) \ge \max\!\left(\texttt{core\_inset\_mm},\ 1.6\,h\right)\right\}.
-$$
+```
 
 이 여백이 코어 복셀이 외벽, 방열핀 골짜기, 리세스 포켓에 절대 닿지 않도록 보장합니다.
 즉 유지되는 모든 복셀은 엔벨로프 경계에서 최소 `inset` 만큼 떨어져 있습니다.
@@ -457,18 +457,18 @@ $$
 리세스에 있을 수 있기 때문입니다. 이런 복셀마다 26개 격자 방향(6면 + 12모서리 +
 8코너 법선)
 
-$$
+```math
 \mathcal{D}_{26} = \left\{\frac{(d_x,d_y,d_z)}{\left\|(d_x,d_y,d_z)\right\|} \;:\; d_{x,y,z}\in\{-1,0,1\},\ (d_x,d_y,d_z)\neq\mathbf{0}\right\}
-$$
+```
 
 으로 광선을 쏘고 하늘 가시 비율을 계산합니다.
 
-$$
+```math
 \varsigma(x)=\frac{1}{26}\sum_{\mathbf{d}\in\mathcal{D}_{26}}
 \mathbf{1}\!\left[\text{ray } (x,\mathbf{d}) \text{ escapes}\right],
 \qquad
 x \text{ is carved if } \varsigma(x)\ge 0.15 .
-$$
+```
 
 제거된 복셀은 안전 여백으로 1복셀 팽창합니다. 후보 복셀은 4,000개 청크 단위로
 동일한 `ThreadPoolExecutor` 에서 병렬 평가합니다(`intersects_any`). 15 % 임계값은
@@ -477,10 +477,10 @@ $$
 
 **슬라이싱 축.** 축마다 최대 12개 단면 $C$ 를 원형도로 평가합니다.
 
-$$
+```math
 \kappa(C)=\frac{\pi\,r_{\max}^2}{|C|},
 \qquad r_{\max}=\max\operatorname{EDT}(C),
-$$
+```
 
 평균 $\kappa$ 가 가장 큰 축을 압출 방향으로 사용합니다. 가장 둥근 단면을 만드는 축을
 고르면 해석적 원통(저렴하고 매끄러움)의 수가 최대화되고 폴리곤 근사 오차가 최소화됩니다.
@@ -489,26 +489,26 @@ $$
 복셀(≈3 mm)에서 출발해, 누적 단면이 일정하게 유지되는 동안 슬라이스 축 방향으로
 슬래브를 **탐욕적으로 확장**합니다.
 
-$$
+```math
 \frac{\left|\,\bigcap_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
      {\left|\,\bigcup_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
 \;\ge\; 0.94 ,
-$$
+```
 
 연속 슬래브 사이는 이음새를 피하려고 $\max(0.25,0.45h)$ 만큼 겹쳐 진행합니다. 슬래브
 $k$ 의 단면은 항상 슬래브 내 모든 복셀 슬라이스의 **교집합**입니다.
 
-$$
+```math
 C_k = \bigcap_{j\in\text{slab}} C_{\text{safe}}[:,:,j],
-$$
+```
 
 따라서 공동이 좁아지는 구간에서도 $C_{\text{safe}}$ 내부 포함(containment)이
 보장되면서, 긴 직선 보어나 사각 하우징은 수십 개의 3 mm 슬라이스 대신 하나의 긴 해석적
 프리미티브로 통합됩니다. 구멍을 채우고 20 mm² 미만의 연결 요소는 버린 뒤, 각 요소를
 다음 중 하나로 만듭니다.
 
-- 내접 반지름 $r^*=h\max\operatorname{EDT}$ 가 $r^*\ge 2.5$ mm 이고
-  $\pi r^{*2}/|C_k|\ge 0.84$ 이면 **원통**(반지름 $\max(r^*-0.1,0.5)$ mm)으로 만들고,
+- 내접 반지름 $r^{\ast}=h\max\operatorname{EDT}$ 가 $r^{\ast}\ge 2.5$ mm 이고
+  $\pi r^{\ast 2}/|C_k|\ge 0.84$ 이면 **원통**(반지름 $\max(r^{\ast}-0.1,0.5)$ mm)으로 만들고,
   인접한 동축 원통(중심 이동 $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$ mm)은
   보수적 반지름 $r_{\text{merged}} = \min(r_1, r_2) - \tfrac{1}{2}\Delta c$ 의 단일
   원통으로 추가 병합해 원래 두 원통 내부 포함을 수학적으로 보장합니다. 또는
@@ -525,41 +525,41 @@ $$
 면이 접하거나 거의 일치하는 경우(결합 플랜지, 베어링 시트, 기어 이) 정밀 B-Rep
 불리언은 수치적으로 매우 민감합니다. 구현은 절대 느슨한 공차로 시작하지 않습니다.
 
-$$
+```math
 \text{fuzzy schedule} = \left(0,\ 10^{-5},\ 10^{-4},\ 10^{-3},\ 5\times10^{-3}\right)
 \ \text{mm}.
-$$
+```
 
 부피 $v_1,v_2$ 인 두 형상의 결과는 다음을 만족할 때만 채택됩니다.
 
-$$
+```math
 V_{\min} = \max(v_1,v_2)-\max\!\left(0.5,\ 0.01\min(v_1,v_2)\right)
 \;\le\; V_{\text{fused}} \;\le\;
 1.01\,(v_1+v_2)+1 .
-$$
+```
 
 이 가드는 "유효해 보이지만 실제로는 한쪽 피연산자를 잃어버린" 고전적 조용한
 실패(탄젠트 면 붕괴, 분리된 도구, 공차 흡수)를 걸러냅니다. 정밀 Fuse 가 실패하거나
 가드를 통과하지 못할 때만 공차를 한 단계씩 올립니다.
 
 배치 경로는 더 엄격합니다. 다중 도구 `BRepAlgoAPI_Fuse`(`SetRunParallel(True)` 및
-전역 `BOPAlgo_Options.SetParallelMode_s(True)`)는 **fuzzy $=0$ 에서만** 시도하고,
+전역 `BOPAlgo_Options.SetParallelMode_s(True)`)는 **오직 $\text{fuzzy}=0$ 에서만** 시도하고,
 다음 조건이면 채택합니다.
 
-$$
+```math
 V_{\text{fused}} \ge 0.99\max_i v_i
 \quad\text{and}\quad
 V_{\text{fused}} \le 1.01\sum_i v_i + 1,
-$$
+```
 
 아니면 **공간 근접 기반 균형 이진 트리 Fuse**로 폴백합니다. 각 트리 레벨에서 바운딩
 박스 중심이 가장 가까운 피연산자 쌍을 탐욕적으로 묶어 인접 바디끼리 균형 있게 병합
-($O(N^2)$ 선형 누적 체인 대신 $O(N\log N)$ 면 교차 성장)하며, 각 쌍은 fuzzy $=0$ 부터
+($O(N^2)$ 선형 누적 체인 대신 $O(N\log N)$ 면 교차 성장)하며, 각 쌍은 $\text{fuzzy}=0$ 부터
 일정을 다시 시작합니다(한 라운드 전체에서 병합이 하나도 없을 때만 순차 복구 패스로
 전환). 배치 전체의 공차를 한꺼번에 느슨하게 하면 *모든* 탄젠트 접촉이 동시에
 손상되므로, 쌍별 승격으로 피해를 국소화합니다.
 
-**2계층 Fuse.** $v_i \ge 0.015\sum_j v_j$(유지 부피의 최소 1.5 %)인 부품(하우징,
+**2계층 Fuse.** $v_i \ge 0.015\sum_j v_j$ (유지 부피의 최소 1.5 %)인 부품(하우징,
 커버, 로터)과 해석적 코어를 먼저 Fuse 하고 **즉시** 폐합 공동 껍질을 소거합니다.
 그다음 나머지 소형 부품(커넥터, 나사, 브래킷)을 Fuse 합니다. 숨은 공동을 일찍
 제거하면 내부 기어 이와 포켓이 이후 교차에 참여하지 않으므로 슬리버 생성과 실패율이
@@ -569,9 +569,9 @@ $$
 
 "솔리드"가 빈 공동을 품을 수 있습니다.
 
-$$
+```math
 V(\Omega) = V_{\text{outer}} - \sum_{j} V_{\text{void},j}.
-$$
+```
 
 솔리드화 이후에는 $\sum_j V_{\text{void},j}=0$ 을 만족해야 단면 절단 시 외곽 스킨
 내부가 항상 재료로 보입니다.
@@ -581,19 +581,19 @@ $$
 승격해 가장 큰 부피를 둘러싸는 것을 고릅니다. 외곽 껍질만으로 솔리드를 재구성하면
 $V' = V_{\text{outer}}$ 가 되고, 다음 조건에서 채택합니다.
 
-$$
+```math
 V' \ge 0.999\,V .
-$$
+```
 
 **숨은 단일 껍질 경우.** 힐링과 불리언 연산은 폐합 공동을 바깥 경계와 **같은**
 `TopoDS_Shell` 안에 넣을 수 있습니다. 그러면 껍질 수는 1로 유지되지만 부품은 여전히
 속이 비어 있습니다. 이것은 B-Rep 의 면 인접 그래프로 검출합니다.
 
-$$
+```math
 G_F=(V_F,E_F),\qquad
 V_F=\{\text{faces}\},\qquad
 (u,v)\in E_F \iff u \text{ and } v \text{ share a B-Rep edge}.
-$$
+```
 
 $G_F$ 의 연결 요소를 BFS 로 계산합니다. OCP 8.x 에서 `MapShapesAndAncestors` 의 형상
 리스트를 Python 으로 반복하면 엣지당 바인딩 오버헤드가 매우 크므로, 구현은 면과 엣지의
@@ -603,9 +603,9 @@ $G_F$ 의 연결 요소를 BFS 로 계산합니다. OCP 8.x 에서 `MapShapesAnd
 솔리드로 변환한 뒤 `ShapeFix_Solid` 로 힐링하고 `BRepLib.OrientClosedSolid` 로 바깥
 방향을 맞춘 다음 다음 조건에서 채택합니다.
 
-$$
+```math
 V' \ge 0.95\,V .
-$$
+```
 
 5 % 완화는 요소 부피가 껍질 중첩의 근사 지표일 뿐이기 때문입니다. 물리적으로 불가능한
 재료 손실은 여전히 거부됩니다.
@@ -613,29 +613,29 @@ $$
 ### 4.6 이격된 외관 아일랜드 브리지
 
 Fuse 후 솔리드가 둘 이상 남으면, 가까운 아일랜드는 삭제하지 않고 **숨은 내부 핀**으로
-연결합니다. 주 바디 $M$(최대 부피)과 아일랜드 $I$ 에 대해
+연결합니다. 주 바디 $M$ (최대 부피)과 아일랜드 $I$ 에 대해
 
 1. $I$ 가 $M$ 안에 완전히 들어 있으면 건너뜁니다. 바운딩 박스가 중첩되고 **동시에**
-   `BRepClass3d_SolidClassifier(M, \text{centroid}(I)) == TopAbs_IN` 인 경우입니다.
+   `BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN` 인 경우입니다.
 2. 테셀레이션된 표면(주 바디와 아일랜드를 `mesh_shapes_in_parallel_buckets` 로 0.25 mm
    일괄 병렬 메싱)에서 최근접 정점 쌍을 병렬 탐색합니다(`cKDTree.query(..., workers=-1)`).
 
-$$
-d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
-(a^{*},b^{*})=\arg\min .
-$$
+   ```math
+   d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
+   (a^{\ast},b^{\ast})=\arg\min .
+   ```
 
-3. $d_{\min} > g_{\max}$(`max_island_gap_mm`, 기본 3 mm)이면 아일랜드를 그대로
+3. $d_{\min} > g_{\max}$ (`max_island_gap_mm`, 기본 3 mm)이면 아일랜드를 그대로
    둡니다(`keep_largest_only` 에 의해 제외되거나, 옵션이 꺼져 있으면 별도 바디로
    남습니다).
-4. 그렇지 않으면 $\hat{\mathbf{u}}=(b^{*}-a^{*})/d_{\min}$ 방향으로
-   $a^{*}-\hat{\mathbf{u}}p$ 에서 시작하는 핀을 만듭니다.
+4. 그렇지 않으면 $\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ 방향으로
+   $a^{\ast}-\hat{\mathbf{u}}p$ 에서 시작하는 핀을 만듭니다.
 
-$$
-r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
-\qquad
-p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
-$$
+   ```math
+   r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
+   \qquad
+   p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
+   ```
 
    길이는 $d_{\min}+2p$ 라서 양쪽 바디에 모두 파고듭니다.
 5. `main + pin` 을 Fuse 한 뒤 `+ island` 를 Fuse 하고(각각 쌍 가드 적용), 결과가 단일
@@ -651,12 +651,12 @@ concatBSplines=False)` 는 동일 평면/동일 원통 면과 공유 엣지를 �
 분할로 조각난 면을 원래 모델링 면으로 되돌립니다). 병합이 병리적으로 이음새를 다시
 열 수 있으므로, 다음 조건을 모두 만족할 때만 결과를 채택합니다.
 
-$$
+```math
 \text{solids}'=\text{solids},\qquad
 \text{shells}'\le\text{shells},\qquad
 \text{watertight}'=\text{true},\qquad
 \frac{|V'-V|}{V}<0.01 .
-$$
+```
 
 그렇지 않으면 병합 전 형상을 유지합니다.
 
@@ -678,9 +678,9 @@ $$
 두 개로 나뉘어 이음새가 실제 경계 엣지가 됩니다. 이어서 `ShapeFix_Shape` 가 다음
 설정으로 와이어와 공차를 복구합니다.
 
-$$
+```math
 \text{precision}=10^{-4},\qquad \text{max tolerance}=10^{-3}.
-$$
+```
 
 이 변환은 솔리드 수가 유지되고, 껍질 수가 증가하지 않으며, 워터타이트가 유지되고,
 부피 변화가 1 % 이내이며, `CheckLacking` 와이어 결함 수가 증가하지 않을 때만
@@ -709,11 +709,11 @@ OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이�
 솔리드를 *Opened* 로 분류합니다. 감사(audit)는 CAD Assistant 의 프로파일을
 재현합니다.
 
-$$
+```math
 (\text{relative},\ \text{angular}) \in \{(0.001,0.50),\ (0.001,0.35)\},
 \qquad
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
-$$
+```
 
 어떤 면이 실패하면 동일한 유효성/부피 가드 아래에서 두 가지 복구를 시도합니다.
 
@@ -724,9 +724,9 @@ $$
    오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가 줄어듭니다. 반지름
    $R$, 각도 $\theta$ 인 원호의 현 편차는
 
-$$
-\delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
-$$
+   ```math
+   \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
+   ```
 
    이므로 $\theta$ 를 절반으로 줄이면 편차가 1/4 로 줄고, 면 수는 늘지 않습니다.
 
@@ -741,10 +741,10 @@ $$
 
 결과가 **유효한 단일 솔리드**라는 조건은 다음과 같습니다.
 
-$$
+```math
 \text{valid}_{\text{BRep}} \ \wedge\ N_{\text{solid}}=1 \ \wedge\ N_{\text{shell}}=1
 \ \wedge\ N_{\text{free edges}}=0 \ \wedge\ V>0 .
-$$
+```
 
 $N_{\text{shell}} = 1$ 이 "남은 내부 공동 껍질이 없다"의 운영적 정의이고,
 $N_{\text{free edges}}=0$ 이 워터타이트 조건입니다.
@@ -797,10 +797,10 @@ sequenceDiagram
 워커는 할당된 파일에 대해 동일한 네 단계를 수행합니다. 전체 진행률은 완료된 파일과
 실행 중인 모든 슬롯의 진행률을 합산합니다.
 
-$$
+```math
 p=\frac{n_{\text{done}}+\sum_{s\in\text{active}}\ell_s}{n_{\text{total}}},
 \qquad 0 \le \ell_s < 1
-$$
+```
 
 여기서 $n_{\text{done}}$ 은 완료된 파일 수이고, $\ell_s$ 는 슬롯 $s$ 의 현재 단계 진행
 구간 안에서의 완료 비율입니다. 구간은 다음과 같습니다.
@@ -840,15 +840,15 @@ Single Mode 와 동일한 뷰어 연동을 사용하므로 두 모드가 같은 
 논리 코어 수가 $C$ 인 시스템에서 워커 수 $W$ 와 워커당 스레드 예산 $T_{\text{worker}}$
 를 다음과 같이 산정합니다(`config.py::resolve_batch_workers`, `threads_per_batch_worker`).
 
-$$
-W = \min\!\left(n_{\text{files}},\ 
+```math
+W = \min\!\left(n_{\text{files}},\;
 \begin{cases}
 \min(w_{\text{cfg}},\ C) & w_{\text{cfg}} > 0,\\[2pt]
 \min\!\left(6,\ \max\!\left(1,\ \lfloor C/4 \rfloor\right)\right) & w_{\text{cfg}} = 0\ (\text{Auto}),
 \end{cases}\right)
 \qquad
 T_{\text{worker}} = \max\!\left(1,\ \lfloor C / W \rfloor\right).
-$$
+```
 
 각 워커는 `configure_occt_parallelism` 으로 OCCT 의 `OSD_ThreadPool.DefaultPool_s().Init(T_worker)`
 를 설정하고, Embree `ThreadPoolExecutor` 는 $\min(T_{\text{worker}}, 12)$ 스레드로 제한합니다.

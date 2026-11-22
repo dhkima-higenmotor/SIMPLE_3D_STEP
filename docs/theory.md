@@ -24,14 +24,14 @@ so the text doubles as a map from theory to code.
 ## 1. Problem statement and pipeline
 
 Given an assembly $\Omega=\bigcup_{i=1}^{N}\Omega_i$ of $N$ solids (housings, covers,
-rotors, gears, bearings, PCBs, fasteners), the goal is a single closed solid $\Omega^{*}$
+rotors, gears, bearings, PCBs, fasteners), the goal is a single closed solid $\Omega^{\ast}$
 such that
 
-$$
-\partial\Omega^{*} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
+```math
+\partial\Omega^{\ast} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
 \qquad
-\operatorname{interior}(\Omega^{*}) \;\supset\; \operatorname{interior}(\Omega),
-$$
+\operatorname{interior}(\Omega^{\ast}) \;\supset\; \operatorname{interior}(\Omega),
+```
 
 where $\Omega_{\text{ext}}$ is the union of *externally visible* parts and
 $\operatorname{interior}$ means the enclosed material volume. In words: **keep every
@@ -71,7 +71,7 @@ flowchart LR
 
 Notation used below: $D$ is the assembly bounding-box diagonal, $D_i$ a part diagonal,
 $A_i$ a part's B-Rep surface area, $T$ the triangle count, and $\tau$ the minimum visible
-ratio ($\tau = \texttt{min\_visible\_ratio\_pct}/100$).
+ratio $\tau$ (`min_visible_ratio_pct / 100`).
 
 ---
 
@@ -83,26 +83,26 @@ A STEP AP214/AP242 assembly is read into an XCAF document. The document is a lab
 graph: product definitions, assemblies, instances (references), and sub-shapes. Each
 instance label carries a `TopLoc_Location`, i.e. a rigid transform
 
-$$
+```math
 T = \begin{bmatrix} R & \mathbf{t} \\ \mathbf{0}^\top & 1 \end{bmatrix},
 \qquad R \in SO(3),\; \mathbf{t}\in\mathbb{R}^3 .
-$$
+```
 
 Walking from a root product $p_0$ through child instances $p_1,\dots,p_k$ composes the
 global placement
 
-$$
+```math
 T_{\text{global}} = T_{p_0}\,T_{p_1}\cdots T_{p_k},
 \qquad \mathbf{x}_{\text{world}} = T_{\text{global}}\,\mathbf{x}_{\text{local}} .
-$$
+```
 
 Reference labels are resolved recursively (`XCAFDoc_ShapeTool.IsReference_s` +
 `GetReferredShape_s`), so an identical part instanced many times yields one shape and
 $k$ placements. The implementation then extracts **leaf solids and free shells**
 
-$$
+```math
 \partial\Omega_i = \text{solids}(\text{shape}) \;\cup\; \text{shells}(\text{shape})\setminus \text{solids},
-$$
+```
 
 and splits multi-body parts into `[Body k]` leaves. This normalization is what makes the
 rest of the pipeline shape-agnostic: everything downstream operates on a flat list of
@@ -114,10 +114,10 @@ Per leaf, OpenCASCADE's exact B-Rep integral properties (`BRepGProp`) are evalua
 
 - **Volume** by the divergence theorem with $\nabla\cdot\mathbf{x}=3$:
 
-$$
-V = \int_{\Omega} dV
-  = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
-$$
+  ```math
+  V = \int_{\Omega} dV
+    = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
+  ```
 
   evaluated analytically on the B-Rep faces (planes, cylinders, NURBS, …), not on a mesh.
 - **Surface area** $A=\int_{\partial\Omega} dA$.
@@ -149,13 +149,13 @@ output**.
 `BRepMesh_IncrementalMesh` tessellates each part with a linear deflection derived from the
 assembly size and a per-part cap for small parts:
 
-$$
+```math
 \delta_L = \max\!\left(0.05,\; 0.0025\,D\right),
 \qquad
 \delta_i = \min\!\left(\delta_L,\; \max\!\left(0.02,\; 0.02\,D_i\right)\right),
 \qquad
 \alpha = 0.5\ \text{rad}.
-$$
+```
 
 Because OCCT's Python bindings (OCP) hold the Python GIL during C++ calls while
 `BRepMesh_IncrementalMesh(..., theInParallel=True)` distributes all faces inside a single
@@ -163,11 +163,11 @@ call across OCCT's native C++ thread pool (`OSD_Parallel`), meshing parts one-by
 starve multi-core CPUs on small components. The implementation therefore groups parts into
 logarithmic deflection buckets (`mesh_shapes_in_parallel_buckets`),
 
-$$
+```math
 b_i = \left\lfloor \frac{\ln \delta_i}{\ln 1.5} \right\rfloor,
 \qquad
 \delta_{\text{bucket}}(b) = \min_{i:\, b_i = b} \delta_i ,
-$$
+```
 
 wraps each bucket in a `TopoDS_Compound`, and meshes finest buckets first so every face
 receives a deflection at least as fine as $\delta_i$ while saturating all C++ threads.
@@ -176,12 +176,12 @@ $3\times 4$ affine matrix in NumPy (`extract_shape_triangles`).
 
 Triangles are appended in a single global buffer with parallel arrays
 
-$$
+```math
 \texttt{tri\_part\_id}[t],\quad \texttt{tri\_face\_id}[t],\quad
-a_t = \tfrac12\left\|(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)\right\|,
+a_t = \tfrac{1}{2}\left\|(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)\right\|,
 \quad
 \hat{\mathbf{n}}_t = \frac{(\mathbf{v}_1-\mathbf{v}_0)\times(\mathbf{v}_2-\mathbf{v}_0)}{\left\|\cdot\right\|}.
-$$
+```
 
 Winding is corrected for `TopAbs_REVERSED` faces so $\hat{\mathbf{n}}_t$ points outward,
 and the `trimesh.Trimesh` is built with `process=False` so triangle indices are **not**
@@ -194,13 +194,13 @@ re-tessellated from scratch.
 ### 3.2 Fibonacci sphere viewpoints
 
 View directions are a Fibonacci (golden-angle) spiral on $S^2$. For $i=0,\dots,n-1$ and
-$u_i=(i+\tfrac12)/n$:
+$u_i=(i+\tfrac{1}{2})/n$:
 
-$$
+```math
 z_i = 1-2u_i,\qquad
 \theta_i = \pi\left(1+\sqrt{5}\right)u_i,\qquad
 \mathbf{v}_i = \left(\sqrt{1-z_i^2}\cos\theta_i,\ \sqrt{1-z_i^2}\sin\theta_i,\ z_i\right).
-$$
+```
 
 Uniformity in $z$ gives equal-area cells ($4\pi/n$ each) and the golden-angle increment
 keeps consecutive samples far apart, so a modest $n$ covers the sphere without the poles
@@ -210,27 +210,27 @@ of a latitude/longitude grid. Presets: **Fast 26**, **Standard 64**, **Fine 162*
 
 For view $i$ the camera looks along $\mathbf{d}_i=-\mathbf{v}_i$ from
 
-$$
+```math
 \mathbf{o}_i = \mathbf{c} + R\,\mathbf{v}_i,\qquad
 R = 0.525\,D,\qquad
-\mathbf{c}=\tfrac12(\mathbf{b}_{\min}+\mathbf{b}_{\max}).
-$$
+\mathbf{c}=\tfrac{1}{2}(\mathbf{b}_{\min}+\mathbf{b}_{\max}).
+```
 
 A square grid of $m\times m$ samples spans $[-R,R]^2$ in the view plane, step
 $s=2R/(m-1)$, restricted to the inscribed disk
 
-$$
+```math
 u_j^2+v_j^2 \le 1.04\,R^2
-$$
+```
 
 (about 21 % of corner rays are wasted otherwise). Each view is offset by a golden-ratio
 sub-pixel jitter
 
-$$
-j_x^{(i)} = \left(\left\{\varphi\,i\right\}-\tfrac12\right)s,\qquad
-j_y^{(i)} = \left(\left\{\varphi^{-2}i\right\}-\tfrac12\right)s,\qquad
-\varphi=\frac{1+\sqrt5}{2},
-$$
+```math
+j_x^{(i)} = \left(\left\{\varphi\,i\right\}-\tfrac{1}{2}\right)s,\qquad
+j_y^{(i)} = \left(\left\{\varphi^{-2}i\right\}-\tfrac{1}{2}\right)s,\qquad
+\varphi=\frac{1+\sqrt{5}}{2},
+```
 
 which turns the per-view sampling lattices into a low-discrepancy union and prevents
 systematic aliasing of thin ribs, fins, and bolt heads.
@@ -238,10 +238,10 @@ systematic aliasing of thin ribs, fins, and bolt heads.
 Each ray is intersected with the BVH (`trimesh` ray intersector backed by Intel Embree)
 using **first hit only** (`intersects_first`):
 
-$$
+```math
 h_t \in \{0,1\},\qquad
 H_i = \sum_{t\in \text{part } i} h_t .
-$$
+```
 
 Because `embreex` releases the Python GIL (`nogil`) during `EmbreeScene.run()` while
 running a single-threaded C++ loop per call, the BVH is committed once on the main thread
@@ -256,25 +256,25 @@ A hit count is not an area: one ray can hit a huge triangle or a tiny one. The e
 uses Cauchy's surface-area formula. For a body with surface area $A$ and a random
 orientation, the **mean projected area** over the viewing hemisphere is
 
-$$
+```math
 \overline{A_{\parallel}} = \frac{A}{4}.
-$$
+```
 
 Over $n_v$ views with ray footprint $s^2$, the sampled projected area per view is
 $H_i s^2 / n_v$, hence
 
-$$
+```math
 \widehat{A}_{\text{vis},i} = \frac{4\,H_i\,s^2}{n_v}.
-$$
+```
 
 The code takes the conservative minimum of this Cauchy estimate and the raw area of the
 triangles that were hit,
 
-$$
+```math
 \widetilde{A}_i = \min\!\left(\sum_{t:\ h_t>0} a_t,\ \ \widehat{A}_{\text{vis},i}\right),
 \qquad
 \rho_i = \min\!\left(1,\ \frac{\widetilde{A}_i}{A_i}\right).
-$$
+```
 
 **Why the minimum?** Summing $a_t$ over hit triangles over-counts grazing triangles: a
 single ray can mark an entire 50 mm² face as exposed. The Cauchy term converts hit counts
@@ -292,31 +292,31 @@ whether any escape to infinity.
 
 Borderline set:
 
-$$
+```math
 B=\left\{\,i \;:\; \rho_i < \tau_2 \,\right\},
 \qquad
 \tau_2 = \max\!\left(2.5\,\tau,\ 0.025\right).
-$$
+```
 
 For each $i\in B$, $n_s=\min(48,\max(12,T_i))$ triangles are drawn **area-proportionally**,
-$P(t)=a_t/A_i$, and $K=32$ hemisphere directions are generated with $z_j=(j+\tfrac12)/K$
+$P(t)=a_t/A_i$, and $K=32$ hemisphere directions are generated with $z_j=(j+\tfrac{1}{2})/K$
 (uniform in $z$ and $\theta$ ⇒ uniform area measure on the hemisphere), rotated into each
 triangle's local frame $(\mathbf{u},\mathbf{w},\hat{\mathbf{n}})$:
 
-$$
+```math
 \mathbf{r}_j = h_{x,j}\,\mathbf{u} + h_{y,j}\,\mathbf{w} + h_{z,j}\,\hat{\mathbf{n}},
 \qquad
 \mathbf{o}_j = \mathbf{c}_t + \epsilon\,\hat{\mathbf{n}},
 \qquad
 \epsilon=\max\!\left(2\times10^{-4}D,\ 0.01\right).
-$$
+```
 
 The escape ratio is the fraction of rays that hit nothing:
 
-$$
+```math
 e_i = \frac{1}{n_s K}\sum_{s=1}^{n_s}\sum_{j=1}^{K}
 \mathbf{1}\!\left[\text{ray }(s,j)\text{ escapes}\right].
-$$
+```
 
 Random surface samples are drawn sequentially on the main thread (`default_rng(42)`) before
 dispatching the `intersects_any` batches to the same `ThreadPoolExecutor`, preserving
@@ -326,7 +326,7 @@ exact RNG determinism across any thread count.
 
 The visibility score merges both passes:
 
-$$
+```math
 v_i = \max\!\left(\rho_i,\ e_i\right),
 \qquad
 \text{status}(i)=
@@ -334,9 +334,9 @@ v_i = \max\!\left(\rho_i,\ e_i\right),
 \text{External (keep)} & v_i \ge \tau \ \text{and}\ V_i \ge V_{\min},\\[2pt]
 \text{Internal (drop)} & \text{otherwise}.
 \end{cases}
-$$
+```
 
-- $\tau = \texttt{min\_visible\_ratio\_pct}/100$ (default $0.005$ = 0.5 %).
+- $\tau$ = `min_visible_ratio_pct / 100` (default $0.005$ = 0.5 %).
 - $V_{\min}$ (`min_part_volume_mm3`) is an optional volume floor, disabled by default.
 - A user override $u_i$ (Keep/Drop toggled in the parts table) always wins:
   classification updates `auto_status` but never touches `keep` when `user_overridden`
@@ -344,9 +344,9 @@ $$
 
 The final B-Rep list is therefore
 
-$$
+```math
 \text{kept} = \{\,i : \text{status}(i)=\text{External} \text{ or } u_i=\text{Keep}\,\}.
-$$
+```
 
 B-Rep faces of a kept part that were hit (or escaped in Pass 2) are recorded as
 `part_visible_faces`; they are the audit trail for "the exterior we promised to preserve".
@@ -372,17 +372,17 @@ With `remove_small_holes`, cylindrical faces are classified as concave bores. Le
 $\mathbf{x}$ be a surface point, $\mathbf{n}$ its outward normal, $\mathbf{a}$ the cylinder
 axis and $\mathbf{x}_a$ the closest point on the axis. The face is an internal hole when
 
-$$
+```math
 \frac{\mathbf{x}_a-\mathbf{x}}{\left\|\mathbf{x}_a-\mathbf{x}\right\|}\cdot\mathbf{n} > 0,
-$$
+```
 
 i.e. the outward normal points *toward* the axis (the material is outside the bore). If the
 radius is $r\le d_{\max}/2$, the bore is removed with `BRepAlgoAPI_Defeaturing` (plus
 `ShapeUpgrade_RemoveInternalWires` with minimum enclosed area $\pi r^2\cdot1.1$), guarded by
 
-$$
+```math
 V' \ge 0.98\,V,
-$$
+```
 
 and limited to solids with $\le 250$ faces and $\le 16$ hole faces for robustness. The
 feature is off by default because it deliberately changes exterior geometry.
@@ -396,11 +396,11 @@ facets.
 **Grid.** With longest extent $L_{\max}=D$ and resolution $R$ (`core_grid_resolution`,
 default 120, clamped to $[64,180]$):
 
-$$
+```math
 h = \frac{L_{\max}}{R},\qquad
 \text{pad}=\left\lceil g/h \right\rceil + 3,\qquad
 \text{dims} = \left\lceil \mathbf{e}/h \right\rceil + 2\,\text{pad} + 1,
-$$
+```
 
 where $g$ = `core_bridge_gap_mm`.
 
@@ -411,16 +411,16 @@ thread, three axis-aligned Embree sweeps (rays along X, Y, Z, split into tiles o
 rays and run across a `ThreadPoolExecutor`) mark every voxel that contains a surface
 intersection (`multiple_hits=True`):
 
-$$
+```math
 O[i,j,k] = \mathbf{1}\!\left[\text{some ray hit voxel }(i,j,k)\right].
-$$
+```
 
 **Sealed interior.** Air is $\neg O$; the outside component is the connected component
 containing the padded corner voxel. Then
 
-$$
+```math
 \text{inside}_0 = \left\{\,x \in \neg O \;:\; \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
-$$
+```
 
 Only regions *not reachable from outside* count as enclosed cavity. An open through-hole
 or a slot therefore lets air connect to the border and is **not** filled — this is why the
@@ -430,29 +430,29 @@ exterior is preserved even with open windows and bores.
 running clearances (rotor/cover gaps, bearing fits) of a few tenths of a millimetre. With
 $r_c = g/h$:
 
-$$
+```math
 D_O=\operatorname{EDT}(\neg O),\quad
 O_r = \left\{D_O \le r_c\right\},\quad
 \text{filled} = \left\{\,x \in \neg O_r : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\},
-$$
+```
 
-$$
+```math
 E = \left\{\,x : \operatorname{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
 \qquad
 \text{inside} = \left\{\,x \in \neg E : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
-$$
+```
 
 Dilation followed by erosion closes gaps up to roughly $2r_c$ in voxel units while
 preserving the outer boundary. The closing is only applied when $r_c \ge 0.75$ voxels
-(≈0.75 grid pitches); below that the raw sealed interior `inside`$_0$ is used unchanged, so
+(≈0.75 grid pitches); below that the raw sealed interior $\text{inside}_0$ is used unchanged, so
 a tiny bridge-gap setting can never distort the cavity. The result is a sealed *envelope*
 whose enclosed air is the cavity volume between parts.
 
 **Strict inward safety inset.** With $D_E=\operatorname{EDT}(E)$ in millimetres:
 
-$$
+```math
 C_{\text{safe}} = \left\{\,x \in \text{inside} \;:\; D_E(x) \ge \max\!\left(\texttt{core\_inset\_mm},\ 1.6\,h\right)\right\}.
-$$
+```
 
 The inset is what guarantees that no core voxel can touch an exterior wall, a cooling fin
 valley, or a recessed pocket: by construction every kept voxel is at least `inset` away
@@ -463,18 +463,18 @@ from any envelope boundary.
 external recess that only the bridged envelope closed. Each such voxel casts the 26
 lattice directions (6 face + 12 edge + 8 corner normals)
 
-$$
+```math
 \mathcal{D}_{26} = \left\{\frac{(d_x,d_y,d_z)}{\left\|(d_x,d_y,d_z)\right\|} \;:\; d_{x,y,z}\in\{-1,0,1\},\ (d_x,d_y,d_z)\neq\mathbf{0}\right\}.
-$$
+```
 
 The sky-visibility fraction is
 
-$$
+```math
 \varsigma(x)=\frac{1}{26}\sum_{\mathbf{d}\in\mathcal{D}_{26}}
 \mathbf{1}\!\left[\text{ray } (x,\mathbf{d}) \text{ escapes}\right],
 \qquad
 x \text{ is carved if } \varsigma(x)\ge 0.15 .
-$$
+```
 
 Carved voxels are dilated by one voxel as a safety margin. Candidate voxels are evaluated
 in 4,000-voxel chunks across the same `ThreadPoolExecutor` (`intersects_any`). The 15 %
@@ -483,10 +483,10 @@ wide-open line of sight to the outside (heatsink fin gaps, counterbores, cable c
 
 **Slicing axis.** For each axis, up to 12 cross-sections $C$ are scored by circularity
 
-$$
+```math
 \kappa(C)=\frac{\pi\,r_{\max}^2}{|C|},
 \qquad r_{\max}=\max\operatorname{EDT}(C),
-$$
+```
 
 and the axis with the largest mean $\kappa$ is used as the extrusion direction. Choosing
 the axis that produces the roundest cross-sections maximizes the number of analytic
@@ -496,26 +496,26 @@ cylinders (cheap, smooth) and minimizes polygon approximation error.
 $w=\max(2,\operatorname{round}(3/h))$ voxels (≈3 mm), each slab is **greedily extended**
 along the slice axis while the cumulative cross-section remains constant:
 
-$$
+```math
 \frac{\left|\,\bigcap_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
      {\left|\,\bigcup_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
 \;\ge\; 0.94 ,
-$$
+```
 
 with an overlap $\max(0.25,0.45h)$ between consecutive slabs to avoid seams. Within slab
 $k$ the cross-section is always the **intersection** of all voxel slices in the slab,
 
-$$
+```math
 C_k = \bigcap_{j\in\text{slab}} C_{\text{safe}}[:,:,j],
-$$
+```
 
 so strict containment inside $C_{\text{safe}}$ is guaranteed even where the cavity tapers,
 while long uniform bores and rectangular housings collapse into single tall primitives
 rather than dozens of 3 mm slices. Holes are filled, connected components smaller than
 20 mm² are dropped, and each component becomes either
 
-- a **cylinder** if its inscribed radius $r^*=h\max\operatorname{EDT}$ satisfies
-  $r^*\ge 2.5$ mm and $\pi r^{*2}/|C_k|\ge 0.84$, with radius $\max(r^*-0.1,0.5)$ mm;
+- a **cylinder** if its inscribed radius $r^{\ast}=h\max\operatorname{EDT}$ satisfies
+  $r^{\ast}\ge 2.5$ mm and $\pi r^{\ast 2}/|C_k|\ge 0.84$, with radius $\max(r^{\ast}-0.1,0.5)$ mm;
   adjacent coaxial cylinders (center shift $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$
   mm) are further coalesced into one cylinder with conservative radius
   $r_{\text{merged}} = \min(r_1, r_2) - \tfrac{1}{2}\Delta c$ so the merged body stays
@@ -534,18 +534,18 @@ Fusing exact B-Rep operands is numerically delicate when faces are tangent or ne
 coincident (mating flanges, bearing seats, gear teeth). The implementation never starts
 with a loose tolerance:
 
-$$
+```math
 \text{fuzzy schedule} = \left(0,\ 10^{-5},\ 10^{-4},\ 10^{-3},\ 5\times10^{-3}\right)
 \ \text{mm}.
-$$
+```
 
 For a pair with volumes $v_1,v_2$ the result is accepted only if
 
-$$
+```math
 V_{\min} = \max(v_1,v_2)-\max\!\left(0.5,\ 0.01\min(v_1,v_2)\right)
 \;\le\; V_{\text{fused}} \;\le\;
 1.01\,(v_1+v_2)+1 .
-$$
+```
 
 This guard rejects the classic silent failure mode in which a Boolean returns a valid-looking
 shape that has lost one operand (tangent-face collapse, disjoint tools, tolerance
@@ -553,14 +553,14 @@ swallowing). Only if exact fusion fails or fails the guard is the tolerance rais
 step at a time.
 
 The batch path is stricter: a single multi-tool `BRepAlgoAPI_Fuse` (`SetRunParallel(True)`
-with global `BOPAlgo_Options.SetParallelMode_s(True)`) is attempted **only** at fuzzy $=0$,
+with global `BOPAlgo_Options.SetParallelMode_s(True)`) is attempted **only** at $\text{fuzzy}=0$,
 accepted if
 
-$$
+```math
 V_{\text{fused}} \ge 0.99\max_i v_i
 \quad\text{and}\quad
 V_{\text{fused}} \le 1.01\sum_i v_i + 1,
-$$
+```
 
 otherwise the code falls back to a **spatial-proximity balanced binary-tree fuse**: at each
 tree level, operands are greedily paired by nearest bounding-box center so touching bodies
@@ -580,9 +580,9 @@ participating in later intersections, which reduces sliver creation and failure 
 
 A "solid" may enclose an empty cavity:
 
-$$
+```math
 V(\Omega) = V_{\text{outer}} - \sum_{j} V_{\text{void},j}.
-$$
+```
 
 After solidification we require $\sum_j V_{\text{void},j}=0$ so that clipping planes show
 material everywhere inside the outer skin.
@@ -592,19 +592,19 @@ identified by `BRepClass3d.OuterShell_s`; if that fails, every shell is promoted
 candidate solid and the one enclosing the largest volume is chosen. Rebuilding the solid
 from the outer shell only gives $V' = V_{\text{outer}}$, and the change is accepted when
 
-$$
+```math
 V' \ge 0.999\,V .
-$$
+```
 
 **Hidden single-shell case.** Healing and Boolean operations can place a closed cavity
 *inside the same* `TopoDS_Shell` as the outer boundary, so the shell count stays 1 while
 the part is still hollow. This is detected with the face-adjacency graph of the B-Rep:
 
-$$
+```math
 G_F=(V_F,E_F),\qquad
 V_F=\{\text{faces}\},\qquad
 (u,v)\in E_F \iff u \text{ and } v \text{ share a B-Rep edge}.
-$$
+```
 
 Connected components of $G_F$ are computed by BFS. In OCP 8.x, iterating
 `MapShapesAndAncestors` shape lists in Python incurs heavy per-edge binding overhead, so
@@ -615,9 +615,9 @@ broken by face count) is rebuilt into a shell (`BRep_Builder`), converted to a s
 healed with `ShapeFix_Solid`, oriented outward with `BRepLib.OrientClosedSolid`, and
 accepted if
 
-$$
+```math
 V' \ge 0.95\,V .
-$$
+```
 
 The 5 % relaxation accounts for the fact that component volume is only a proxy for shell
 nesting; a physically impossible loss of material is still rejected.
@@ -628,27 +628,27 @@ If the fuse leaves more than one solid, nearby islands are connected with **hidd
 pins** rather than deleted. With the main body $M$ (largest volume) and island $I$:
 
 1. Skip if $I$ lies strictly inside $M$: bounding boxes nested **and**
-   `BRepClass3d_SolidClassifier(M, \text{centroid}(I)) == TopAbs_IN`.
+   `BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN`.
 2. Compute the closest vertex pair between tessellated surfaces (main body and islands
    batch-meshed together at 0.25 mm via `mesh_shapes_in_parallel_buckets`, queried in
    parallel via `cKDTree.query(..., workers=-1)`):
 
-$$
-d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
-(a^{*},b^{*})=\arg\min .
-$$
+   ```math
+   d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
+   (a^{\ast},b^{\ast})=\arg\min .
+   ```
 
 3. If $d_{\min} > g_{\max}$ (`max_island_gap_mm`, default 3 mm), leave the island
    untouched (it will be excluded by `keep_largest_only` or remain a separate body if that
    option is disabled).
 4. Otherwise build a pin along
-   $\hat{\mathbf{u}}=(b^{*}-a^{*})/d_{\min}$ starting at $a^{*}-\hat{\mathbf{u}}p$ with
+   $\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ starting at $a^{\ast}-\hat{\mathbf{u}}p$ with
 
-$$
-r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
-\qquad
-p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
-$$
+   ```math
+   r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
+   \qquad
+   p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
+   ```
 
    length $d_{\min}+2p$ so it penetrates both bodies.
 5. Fuse `main + pin` and then `+ island`, each under the pair guard, and require a single
@@ -664,12 +664,12 @@ concatBSplines=False)` merges coplanar/co-cylindrical faces and their shared edg
 (typically collapsing Boolean fragmentation into the original modelling faces). Because
 unification can, in pathological cases, re-open seams, the result is accepted only if
 
-$$
+```math
 \text{solids}'=\text{solids},\qquad
 \text{shells}'\le\text{shells},\qquad
 \text{watertight}'=\text{true},\qquad
 \frac{|V'-V|}{V}<0.01 .
-$$
+```
 
 Otherwise the pre-unification shape is kept.
 
@@ -690,9 +690,9 @@ seam wire may appear *lacking* and the face is treated as open. `ShapeUpgrade_Sh
 with one split point turns every periodic face into two 180° non-periodic faces, so the
 seam becomes real boundary edges. `ShapeFix_Shape` then repairs wires and tolerances with
 
-$$
+```math
 \text{precision}=10^{-4},\qquad \text{max tolerance}=10^{-3}.
-$$
+```
 
 The transformation is accepted only if it preserves solids, does not increase shells,
 stays watertight, keeps volume within 1 %, and does not increase the count of
@@ -721,11 +721,11 @@ OCCT's shaded-solid exploration classifies a solid as *Opened* if even one face 
 NULL triangulation at the viewer's deflection. The audit reproduces CAD Assistant's
 profiles:
 
-$$
+```math
 (\text{relative},\ \text{angular}) \in \{(0.001,0.50),\ (0.001,0.35)\},
 \qquad
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
-$$
+```
 
 If any face fails, two repairs are attempted, each guarded by the same validity/volume
 checks:
@@ -737,9 +737,9 @@ checks:
    error is exactly zero, while the maximum chord sagitta of the viewer's tessellation
    drops. For a circular arc of radius $R$ and angle $\theta$, chord deviation is
 
-$$
-\delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
-$$
+   ```math
+   \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
+   ```
 
    so halving $\theta$ quarters the deviation without adding faces.
 
@@ -754,12 +754,12 @@ $$
 
 A result is a **valid single solid** if and only if
 
-$$
+```math
 \text{valid}_{\text{BRep}} \ \wedge\ N_{\text{solid}}=1 \ \wedge\ N_{\text{shell}}=1
 \ \wedge\ N_{\text{free edges}}=0 \ \wedge\ V>0 .
-$$
+```
 
-`N_shell = 1` is the operational definition of "no remaining internal void shells", and
+$N_{\text{shell}} = 1$ is the operational definition of "no remaining internal void shells", and
 $N_{\text{free edges}}=0$ is watertightness.
 
 ---
@@ -810,12 +810,12 @@ Up to $W$ files execute concurrently in separate persistent CAD worker slots (`_
 each advancing its assigned file through the same four stages. Overall progress aggregates
 finished files and all in-flight slots:
 
-$$
+```math
 p=\frac{n_{\text{done}}+\sum_{s\in\text{active}}\ell_s}{n_{\text{total}}},
 \qquad 0 \le \ell_s < 1 ,
-$$
+```
 
-where $n_{\text{done}}$ is the number of finished files and $\ell_s$ is slot $s$'s fraction
+where $n_{\text{done}}$ is the number of finished files and $\ell_s$ is the fraction of slot $s$
 completed inside its current stage's band:
 
 | Stage | Command | Band |
@@ -852,15 +852,15 @@ caches) and keep per-worker RAM bounded (~0.5–2 GB per large assembly), worker
 and per-worker thread budget $T_{\text{worker}}$ are computed on a machine with $C$ logical
 cores as (`config.py::resolve_batch_workers`, `threads_per_batch_worker`):
 
-$$
-W = \min\!\left(n_{\text{files}},\ 
+```math
+W = \min\!\left(n_{\text{files}},\;
 \begin{cases}
 \min(w_{\text{cfg}},\ C) & w_{\text{cfg}} > 0,\\[2pt]
 \min\!\left(6,\ \max\!\left(1,\ \lfloor C/4 \rfloor\right)\right) & w_{\text{cfg}} = 0\ (\text{Auto}),
 \end{cases}\right)
 \qquad
 T_{\text{worker}} = \max\!\left(1,\ \lfloor C / W \rfloor\right).
-$$
+```
 
 Each worker configures OCCT's `OSD_ThreadPool.DefaultPool_s().Init(T_worker)` (via
 `configure_occt_parallelism`) and caps its Embree `ThreadPoolExecutor` at
