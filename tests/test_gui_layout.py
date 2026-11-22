@@ -21,6 +21,15 @@ def _isolate_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
+def test_packaged_window_icon_is_available() -> None:
+    """The app icon ships with the package and is a valid multi-size .ico."""
+    import simple_3d_step.gui.app as app_module
+
+    icon = Path(app_module.__file__).with_name("assets") / "app.ico"
+    assert icon.is_file()
+    assert icon.read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+
 def test_gui_default_layout_no_menu_no_clipping_and_params_toggle() -> None:
     app = Simple3DStepApp()
     try:

@@ -18,6 +18,7 @@ from simple_3d_step.config import (
     save_config,
 )
 from simple_3d_step.core.worker import CadWorkerClient
+from simple_3d_step.gui.batch_panel import BatchPanel
 from simple_3d_step.gui.busy_banner import BusyBanner
 from simple_3d_step.gui.control_panel import ControlPanel
 from simple_3d_step.gui.log_panel import LogPanel
@@ -33,8 +34,14 @@ BASE_TITLE = "SIMPLE 3D STEP — Internal Part Removal & Exact B-Rep Solidifier"
 class Simple3DStepApp(tk.Tk):
     """Desktop GUI for removing internal STEP parts and creating a solid outer body."""
 
-    def __init__(self, initial_step: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        initial_step: Optional[Path] = None,
+        initial_files: Optional[list[Path]] = None,
+        start_mode: str = "single",
+    ) -> None:
         super().__init__()
+        self._set_window_icon()
         self.title(BASE_TITLE)
 
         # Compact default window size (smaller than before) while preventing any clipping
@@ -48,6 +55,9 @@ class Simple3DStepApp(tk.Tk):
         self._config_path = get_default_config_path()
         self._config: AppConfig = load_config(self._config_path)
 
+        self._start_mode = start_mode if start_mode in ("single", "batch") else "single"
+        self._initial_files: list[Path] = [Path(p) for p in (initial_files or [])]
+
         # Metadata-only assembly/result in GUI process; real OCCT shapes live in worker process
         self._assembly: Optional[AssemblyModel] = None
         self._result: Optional[SimplifyResult] = None
@@ -60,7 +70,9 @@ class Simple3DStepApp(tk.Tk):
         self._active_task_name: str = ""
         self._active_on_success: Optional[Callable[[Any], None]] = None
         self._pending_initial_step: Optional[Path] = (
-            initial_step if (initial_step and initial_step.exists()) else None
+            initial_step
+            if (self._start_mode == "single" and initial_step and initial_step.exists())
+            else None
         )
 
         # Right-hand parameter panel is hidden by default for a clean beginner-friendly UI
@@ -83,17 +95,97 @@ class Simple3DStepApp(tk.Tk):
         self._bind_shortcuts()
         self._update_ui_state()
 
+        # Pre-fill the batch queue with any files passed on the command line
+        # (run_simple_3d_step.bat drag & drop supports several files at once)
+        self._batch_panel.queue_files(self._initial_files)
+        self._select_mode(self._start_mode)
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(40, self._poll_worker)
+        self._poll_after_id: Optional[str] = self.after(40, self._poll_worker)
 
         viewer_info = self._config.viewer_executable or "(Windows Default Application)"
         self._log_panel.append_log(f"Loaded config: {self._config_path}")
         self._log_panel.append_log(f"External 3D viewer: {viewer_info}")
         self._log_panel.append_log("Starting background CAD worker process (freeze-free mode)...")
 
+    def _set_window_icon(self) -> None:
+        """Apply the packaged app.ico to the window title bar / taskbar (best effort)."""
+        icon = Path(__file__).with_name("assets") / "app.ico"
+        if not icon.is_file():
+            return
+        try:
+            # Rounded tiles look best as the window/taskbar icon on every toplevel
+            self.iconbitmap(str(icon))
+            self.iconbitmap(default=str(icon))
+        except tk.TclError:
+            pass
+
     def _bind_shortcuts(self) -> None:
-        self.bind_all("<Control-o>", lambda _e: self._on_open_step())
-        self.bind_all("<Control-s>", lambda _e: self._on_save_result())
+        # Shortcuts are routed to whichever mode tab is currently active
+        self.bind_all("<Control-o>", lambda _e: self._on_shortcut_open())
+        self.bind_all("<Control-s>", lambda _e: self._on_shortcut_save())
+        self.bind_all("<F5>", lambda _e: self._on_shortcut_run())
+        self.bind_all("<Escape>", lambda _e: self._on_shortcut_stop())
+
+    # --- Mode tabs (Single / Batch) ---
+
+    def _current_mode(self) -> str:
+        """Return the active mode tab key: ``"single"`` or ``"batch"``."""
+        try:
+            current = self._notebook.select()
+        except tk.TclError:
+            return "single"
+        return "batch" if str(current) == str(self._batch_panel) else "single"
+
+    def _select_mode(self, mode: str) -> None:
+        """Switch to the Single or Batch mode tab."""
+        page = self._batch_panel if mode == "batch" else self._single_tab
+        self._notebook.select(page)
+        self._on_mode_changed()
+
+    def _on_mode_changed(self, _event: Optional[tk.Event] = None) -> None:
+        # Warm up the batch CAD worker as soon as the batch tab is opened
+        if self._current_mode() == "batch":
+            self._batch_panel.ensure_worker()
+        self._sync_mode_tabs()
+
+    def _sync_mode_tabs(self) -> None:
+        """Reflect busy / running state in the notebook tab labels and window title."""
+        single_text = "  ● Single Mode  " if self._busy else "  Single Mode  "
+        batch = self._batch_panel
+        batch_text = (
+            f"  ● Batch Mode ({batch.completed}/{batch.total})  "
+            if batch.running
+            else "  Batch Mode  "
+        )
+        for idx, text in enumerate((single_text, batch_text)):
+            if self._notebook.tab(idx, "text") != text:
+                self._notebook.tab(idx, text=text)
+
+        if self._busy:
+            return
+        if batch.running and self._current_mode() == "batch":
+            self.title(f"[{batch.completed + 1}/{batch.total}] Batch processing — SIMPLE 3D STEP")
+        else:
+            self.title(BASE_TITLE)
+
+    def _on_shortcut_open(self) -> None:
+        if self._current_mode() == "batch":
+            self._batch_panel.add_files_dialog()
+        else:
+            self._on_open_step()
+
+    def _on_shortcut_save(self) -> None:
+        if self._current_mode() == "single":
+            self._on_save_result()
+
+    def _on_shortcut_run(self) -> None:
+        if self._current_mode() == "batch":
+            self._batch_panel.run()
+
+    def _on_shortcut_stop(self) -> None:
+        if self._current_mode() == "batch":
+            self._batch_panel.stop()
 
     def _make_step_button(
         self,
@@ -160,8 +252,19 @@ class Simple3DStepApp(tk.Tk):
             self._apply_step_style(key, "idle")
 
     def _build_layout(self) -> None:
+        # Mode tabs: [Single Mode] 4-step workflow / [Batch Mode] multi-file queue
+        self._notebook = ttk.Notebook(self)
+        self._notebook.pack(fill=tk.BOTH, expand=True)
+
+        self._single_tab = tk.Frame(self._notebook, background=COLORS["app_bg"])
+        self._batch_panel = BatchPanel(self._notebook, config_path=self._config_path)
+
+        self._notebook.add(self._single_tab, text="  Single Mode  ")
+        self._notebook.add(self._batch_panel, text="  Batch Mode  ")
+        self._notebook.bind("<<NotebookTabChanged>>", self._on_mode_changed)
+
         # 1. Elevated white top header card split cleanly into 2 compact rows for large fonts
-        header_card = tk.Frame(self, background=COLORS["surface"])
+        header_card = tk.Frame(self._single_tab, background=COLORS["surface"])
         header_card.pack(side=tk.TOP, fill=tk.X)
 
         # Row 1: Primary 4-step workflow buttons
@@ -240,7 +343,7 @@ class Simple3DStepApp(tk.Tk):
         self._file_var = tk.StringVar(value="No file loaded — click [Open STEP] above to select a file.")
         self._result_badge_var = tk.StringVar(value="")
 
-        self._info_bar = tk.Frame(self, background=COLORS["surface_alt"], padx=12, pady=5)
+        self._info_bar = tk.Frame(self._single_tab, background=COLORS["surface_alt"], padx=12, pady=5)
         self._info_bar.pack(side=tk.TOP, fill=tk.X)
         tk.Label(
             self._info_bar,
@@ -261,21 +364,21 @@ class Simple3DStepApp(tk.Tk):
         )
         self._result_badge.pack(side=tk.RIGHT)
 
-        tk.Frame(self, height=1, background=COLORS["border"]).pack(side=tk.TOP, fill=tk.X)
+        tk.Frame(self._single_tab, height=1, background=COLORS["border"]).pack(side=tk.TOP, fill=tk.X)
 
         # 3. Bottom Log & Progress drawer — packed BEFORE main_pane so it is NEVER clipped
-        self._log_panel = LogPanel(self, on_cancel=self._on_cancel_task)
+        self._log_panel = LogPanel(self._single_tab, on_cancel=self._on_cancel_task)
         self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
 
         # Dynamic animated busy banner (packed above main_pane only while busy)
         self._busy_banner = BusyBanner(
-            self,
+            self._single_tab,
             on_cancel=self._on_cancel_task,
             on_force_cancel=self._on_force_cancel_task,
         )
 
         # 4. Main PanedWindow packed LAST with expand=True so it absorbs all remaining space
-        self._main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        self._main_pane = ttk.PanedWindow(self._single_tab, orient=tk.HORIZONTAL)
         self._main_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 4))
 
         self._part_tree = PartTreePanel(
@@ -415,6 +518,13 @@ class Simple3DStepApp(tk.Tk):
         self._update_ui_state()
 
     def _poll_worker(self) -> None:
+        self._poll_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._sync_mode_tabs()
         if self._busy:
             self.title(
                 f"[Working {self._busy_banner.elapsed_formatted}] {self._active_task_name} — SIMPLE 3D STEP"
@@ -500,7 +610,7 @@ class Simple3DStepApp(tk.Tk):
                 self._update_ui_state()
                 messagebox.showerror(f"{task_name} Error", err_msg, parent=self)
 
-        self.after(40, self._poll_worker)
+        self._poll_after_id = self.after(40, self._poll_worker)
 
     # --- Actions ---
 
@@ -729,14 +839,22 @@ class Simple3DStepApp(tk.Tk):
     def _on_open_settings(self) -> None:
         def _saved(updated: AppConfig) -> None:
             self._config = updated
+            self._batch_panel.reload_config()
             viewer = updated.viewer_executable or "(Windows Default Application)"
             self._log_panel.append_log(f"Settings saved — External 3D viewer: {viewer}")
 
         SettingsDialog(self, self._config, self._config_path, on_saved=_saved)
 
     def _on_close(self) -> None:
+        if self._poll_after_id is not None:
+            try:
+                self.after_cancel(self._poll_after_id)
+            except Exception:
+                pass
+            self._poll_after_id = None
         self._busy_banner.stop()
         self._control_panel.sync_to_app_config(self._config)
         save_config(self._config, self._config_path)
         self._worker.shutdown()
+        self._batch_panel.shutdown()
         self.destroy()

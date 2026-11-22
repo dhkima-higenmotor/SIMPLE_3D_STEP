@@ -362,12 +362,12 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
             fieldbackground=[("readonly", COLORS["surface"])],
         )
 
-    # Flat Modern Notebook Tabs
+    # Flat Modern Notebook Tabs (mode switcher: Single / Batch)
     style.configure(
         "TNotebook",
         background=COLORS["surface"],
         borderwidth=0,
-        tabmargins=(0, 0, 0, 0),
+        tabmargins=(6, 6, 0, 0),
     )
     style.configure(
         "TNotebook.Tab",
@@ -376,8 +376,8 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
         bordercolor=COLORS["border"],
         lightcolor=COLORS["surface_alt"],
         darkcolor=COLORS["border"],
-        padding=(10, 6),
-        font=FONTS["small"],
+        padding=(18, 7),
+        font=FONTS["base_bold"],
     )
     style.map(
         "TNotebook.Tab",
@@ -386,10 +386,13 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
             ("active", "#e2e8f0"),
         ],
         foreground=[
-            ("selected", COLORS["accent"]),
+            ("selected", COLORS["accent_text"]),
             ("active", COLORS["text"]),
         ],
-        font=[("selected", FONTS["small_bold"])],
+        bordercolor=[
+            ("selected", COLORS["accent_border"]),
+            ("active", COLORS["border_strong"]),
+        ],
         expand=[("selected", [0, 0, 0, 1])],
     )
 

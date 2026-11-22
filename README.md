@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/icon.png" width="120" alt="SIMPLE 3D STEP application icon">
+</p>
+
 # SIMPLE 3D STEP
 
 > **Language:** **English** | [한국어 (README_KO.md)](README_KO.md)
@@ -6,7 +10,35 @@ A desktop and CLI tool for simplifying complex 3D STEP assemblies (containing in
 
 ---
 
+## GUI Overview
+
+The application runs as a single window with two tabs — **Single Mode** for the interactive 4-step workflow, and **Batch Mode** for processing many STEP files one after another. Switch tabs at any time from the top of the window.
+
+### Single Mode — Interactive 4-Step Workflow
+
+![Single Mode GUI: completed part analysis and exact B-Rep solidification](docs/screenshots/gui_single_mode.png)
+
+External parts are kept (green) and hidden internal parts are dropped (red) in the parts table; the workflow buttons turn green `✔` as each step completes, and the result badge reports the final single-solid validation (`Solid 1 / Shell 1 · Fill +402,124 mm³`). The advanced parameter drawer on the right is hidden by default and toggled via **[Parameters]**.
+
+### Batch Mode — Sequential Multi-File Queue
+
+![Batch Mode GUI: two STEP files processed sequentially with results saved next to each source file](docs/screenshots/gui_batch_mode.png)
+
+Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / `Skipped`), source folder, and output file name. **RUN** processes the highlighted rows (or the whole queue when nothing is selected) sequentially using the parameters in `config.json`, and the final `Batch finished — N succeeded, M failed` summary is shown in the status bar. **Double-click a completed row** to open its `<name>_simplified.step` in the configured external 3D viewer.
+
+### Application Icon
+
+<p align="center">
+  <img src="docs/images/icon_sizes_preview.png" width="680" alt="SIMPLE 3D STEP icon rendered at 16, 24, 32, 48, 64, 128 and 256 px on light and dark backgrounds">
+</p>
+
+The icon summarizes the whole tool in one mark: a clean **isometric solid cube** (one watertight body), an **engraved gear** on its front face (the hidden mechanical internals), and an **emerald check badge** (simplification complete). Small sizes (16–32 px) automatically switch to a compact variant without the gear engraving so the cube and check stay legible in the taskbar and file lists. The 512 px master is `docs/images/icon.png`, the window/taskbar icon is `src/simple_3d_step/gui/assets/app.ico` (16–256 px), and both are regenerated with `uv run python tools/make_icon.py`.
+
+---
+
 ## Key Features
+
+> 📖 **Mathematical & algorithmic background:** [English (docs/theory.md)](docs/theory.md) · [한국어 (docs/theory_ko.md)](docs/theory_ko.md)
 
 ### 1. XCAF-Based STEP Assembly Parsing (`STEPCAFControl_Reader`)
 - Preserves assembly hierarchy, part names, instance placements (`TopLoc_Location`), volumes, surface areas, face counts, and bounding boxes.
@@ -25,6 +57,7 @@ A desktop and CLI tool for simplifying complex 3D STEP assemblies (containing in
 - **Floating Exterior Part Bridging & Same-Domain Unification**: Connects tolerance-gapped exterior parts (connectors, fasteners) via hidden internal B-Rep pins and merges coplanar/co-surface faces with `ShapeUpgrade_UnifySameDomain`.
 
 ### 4. Freeze-Free Modern Flat GUI (`tkinter` / `ttk`)
+- **Two Mode Tabs in One Window**: **Single Mode** (interactive 4-step workflow with a parts table) and **Batch Mode** (sequential multi-file queue driven by `config.json`) switch instantly, each with its own background CAD worker so neither blocks the other.
 - **Dedicated Background CAD Process (`multiprocessing`)**: Heavy OpenCASCADE C++ operations run in a persistent worker process so the GUI window never freezes (`Not Responding`).
 - **Live Busy Status Banner**: Displays an animated spinner, live elapsed timer, continuous pulse progress bar, and two-stage `Cancel / Force Stop` controls while updating the window title with elapsed time.
 - **Bold 4-Step Workflow Bar with State Feedback**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` are highlighted in bold and automatically transition between idle, running (blue `●`), and completed (green `✔`) states; manual part edits automatically reset downstream steps.
@@ -49,14 +82,17 @@ uv sync
 ## Usage
 
 ### 1. Launch via Batch File (Recommended on Windows)
-- **Double-click** `run_simple_3d_step.bat` in File Explorer to launch the GUI without a console window.
-- **Drag and drop** any `.step` / `.stp` file onto `run_simple_3d_step.bat` to open it immediately on startup.
+- **Double-click** `run_simple_3d_step.bat` in File Explorer to launch the unified GUI without a console window.
+- **Drag and drop** a single `.step` / `.stp` file onto `run_simple_3d_step.bat` to open it immediately in **Single Mode**.
+- **Drag and drop several** STEP files at once to open the **Batch Mode** tab with all of them queued.
 - On first run, if `.venv` does not exist yet, `uv sync` is executed automatically.
 
 ### 2. Launch GUI from Command Line
 ```powershell
-uv run simple-3d-step
+uv run simple-3d-step                 # Single Mode tab
+uv run simple-3d-step --batch         # Batch Mode tab
 uv run simple-3d-step path\to\assembly.step
+uv run simple-3d-step a.step b.step   # opens Batch Mode with both queued
 ```
 
 ### 3. CLI Batch Mode
@@ -81,9 +117,23 @@ run_simple_3d_step.bat --help
 | `--no-core` / `--no-unify` | `False` | Disable internal core filling / same-domain face unification |
 | `--schema` | `AP214` | Output STEP schema (`AP214`, `AP242`, `AP203`) |
 
+### 4. Mode Tabs — Single Mode / Batch Mode
+
+The GUI has two tabs, switchable at any time from the top of the window (see the screenshots in [GUI Overview](#gui-overview)):
+
+**Single Mode** — the interactive 4-step workflow described below (open one assembly, inspect the parts table, preview, convert, save).
+
+**Batch Mode** — a multi-file queue driven entirely by `config.json`:
+
+- **[Add STEP Files...]** (`Ctrl+O`) selects several `.step` / `.stp` files at once (multi-select), and **[Remove Selected]** / **[Clear List]** curate the queue.
+- Press **[RUN]** (`F5`): every queued file — or only the highlighted rows, when a selection exists — is simplified **sequentially** with the parameters from `config.json` (re-read on every RUN).
+- Each simplified model is written **next to its own source file** as `<name>_simplified.step`.
+- **[Stop]** (`Esc`) cancels the current file and skips the rest; **[Force Stop]** immediately kills and restarts the background CAD worker if a C++ step is stuck.
+- The Batch tab label shows live progress (`● Batch Mode (2/5)`) even while you work in Single Mode; each mode uses its own background CAD worker, so the two never block each other.
+
 ---
 
-## Standard GUI Workflow
+## Standard GUI Workflow (Single Mode)
 
 1. **[Open STEP]** (`Ctrl+O`): Load a 3D STEP assembly containing internal parts.
 2. **[1. Analyze Parts]**: Automatically identify non-visible internal parts and mark them as `Drop`.
@@ -125,7 +175,14 @@ SIMPLE_3D_STEP/
 ├── README_KO.md                     # Korean documentation
 ├── config.json                      # External 3D viewer path and default parameters
 ├── pyproject.toml                   # uv project metadata and dependencies
-├── run_simple_3d_step.bat           # Windows launcher (GUI / drag-and-drop / CLI)
+├── run_simple_3d_step.bat           # Windows launcher (Single/Batch tabbed GUI, drag-and-drop, CLI)
+├── docs/
+│   ├── images/                      # Application icon (512 px master + size preview sheet)
+│   ├── screenshots/                 # README GUI screenshots (Single Mode / Batch Mode)
+│   ├── theory.md                    # Key Features expanded into math & algorithms (English)
+│   └── theory_ko.md                 # Same document in Korean
+├── tools/
+│   └── make_icon.py                 # Regenerates docs/images/*.png and gui/assets/app.ico
 ├── src/simple_3d_step/
 │   ├── main.py                      # GUI and CLI entry point
 │   ├── config.py                    # config.json persistence and external viewer launcher
@@ -140,7 +197,8 @@ SIMPLE_3D_STEP/
 │   │   └── worker.py                # Persistent multiprocessing CAD worker (non-blocking GUI)
 │   └── gui/
 │       ├── theme.py                 # Modern Flat (Slate & Cobalt) design tokens & ttk theme
-│       ├── app.py                   # Main GUI window and 4-step workflow controller
+│       ├── app.py                   # Unified window: Single/Batch mode tabs + 4-step workflow
+│       ├── batch_panel.py           # Batch mode tab (multi-file sequential RUN, config.json driven)
 │       ├── part_tree.py             # Assembly parts table (search/filter/sort/manual toggle)
 │       ├── control_panel.py         # Collapsible advanced parameters & result summary panel
 │       ├── busy_banner.py           # Animated background task banner
@@ -152,6 +210,7 @@ SIMPLE_3D_STEP/
     ├── test_solidifier.py           # Exact B-Rep single-solid & void-shell purge tests
     ├── test_worker.py               # Non-blocking multiprocessing pipeline tests
     ├── test_gui_layout.py           # Modern Flat layout, bold workflow bar, toggle & save-path tests
+    ├── test_batch_gui.py            # Mode tabs, batch config mapping, same-dir output & sequential run tests
     └── test_config_and_cli.py       # Config persistence and CLI end-to-end tests
 ```
 

@@ -72,8 +72,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="simple-3d-step",
         description="Remove internal STEP assembly parts and convert exterior B-Rep into a single solid body",
     )
-    parser.add_argument("step_file", nargs="?", help="Optional STEP file to open automatically in GUI")
+    parser.add_argument(
+        "step_file",
+        nargs="*",
+        help="Optional STEP file(s): opened in the single-file GUI, or pre-queued in --batch mode",
+    )
     parser.add_argument("--cli", action="store_true", help="Run in headless CLI batch mode")
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Open the GUI on the Batch Mode tab (sequential multi-file simplify)",
+    )
     parser.add_argument("-i", "--input", help="Input STEP file path for CLI mode")
     parser.add_argument("-o", "--output", help="Output STEP file path for CLI mode")
     parser.add_argument("--views", type=int, default=64, help="Number of Fibonacci sphere viewpoints")
@@ -93,15 +102,24 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.cli or args.input:
         if not args.input and args.step_file:
-            args.input = args.step_file
+            args.input = args.step_file[0]
         if not args.input:
             parser.error("CLI mode requires --input or a STEP file path.")
         return _run_cli(args)
 
+    step_files = [Path(p).resolve() for p in args.step_file]
+
+    # Multiple files (or --batch) open the Batch Mode tab; one file opens Single Mode
+    start_mode = "batch" if (args.batch or len(step_files) > 1) else "single"
+    initial_step = step_files[0] if (step_files and start_mode == "single") else None
+
     from simple_3d_step.gui.app import Simple3DStepApp
 
-    initial = Path(args.step_file).resolve() if args.step_file else None
-    app = Simple3DStepApp(initial_step=initial)
+    app = Simple3DStepApp(
+        initial_step=initial_step,
+        initial_files=step_files,
+        start_mode=start_mode,
+    )
     app.mainloop()
     return 0
 

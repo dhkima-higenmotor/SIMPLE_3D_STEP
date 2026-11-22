@@ -35,7 +35,8 @@ if "%RUN_CLI%"=="1" (
     exit /b %errorlevel%
 )
 
-rem Launch Tkinter GUI without leaving a console window open
-rem (Supports double-click or dragging a .step/.stp file onto this .bat file)
+rem Launch the unified Tkinter GUI (Single Mode / Batch Mode tabs) without a console window
+rem (Double-click: empty GUI, drag one .step/.stp: Single Mode, drag several: Batch Mode queue,
+rem  drag nothing but use --batch: Batch Mode tab)
 start "" "%~dp0.venv\Scripts\pythonw.exe" -m simple_3d_step.main %*
 endlocal
