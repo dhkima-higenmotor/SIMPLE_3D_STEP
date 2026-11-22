@@ -25,6 +25,8 @@ from simple_3d_step.config import (
     get_default_config_path,
     launch_external_viewer,
     load_config,
+    resolve_batch_workers,
+    threads_per_batch_worker,
 )
 from simple_3d_step.core.worker import CadWorkerClient
 from simple_3d_step.gui.log_panel import LogPanel
@@ -84,8 +86,20 @@ class BatchItem:
     output_path: Optional[Path] = None
 
 
+@dataclass
+class _WorkerSlot:
+    """Tracks one persistent CAD subprocess and its currently assigned batch item."""
+
+    slot_id: int
+    client: CadWorkerClient
+    item_idx: Optional[int] = None
+    cmd_id: Optional[int] = None
+    stage: str = ""
+    file_progress: float = 0.0
+
+
 class BatchPanel(tk.Frame):
-    """Sequential multi-file STEP simplifier driven by ``config.json``."""
+    """Multi-worker parallel multi-file STEP simplifier driven by ``config.json``."""
 
     # Relative progress weight of every pipeline stage within a single file
     _STAGE_RANGES = {
@@ -114,7 +128,8 @@ class BatchPanel(tk.Frame):
         self._config: AppConfig = load_config(self._config_path)
 
         self._items: list[BatchItem] = []
-        self._worker: Optional[CadWorkerClient] = None
+        self._slots: list[_WorkerSlot] = []
+        self._worker: Optional[CadWorkerClient] = None  # Primary worker slot (slots[0])
         self._poll_after_id: Optional[str] = None
 
         # Batch orchestration state
@@ -124,6 +139,8 @@ class BatchPanel(tk.Frame):
         self._current_idx: Optional[int] = None
         self._active_cmd_id: Optional[int] = None
         self._stage = ""
+        self._batch_concurrency = 1
+        self._started_count = 0
         self._total = 0
         self._done_count = 0
         self._ok_count = 0
@@ -409,11 +426,12 @@ class BatchPanel(tk.Frame):
 
     def _refresh_config_summary(self) -> None:
         c = self._config
+        resolved_w = resolve_batch_workers(c.batch_workers)
+        worker_lbl = f"auto ({resolved_w})" if int(c.batch_workers) <= 0 else str(resolved_w)
         self._param_var1.set(
-            f"Parameters from config.json:   views={c.num_views}  ·  grid={c.grid_resolution}  ·  "
-            f"min visible={c.min_visible_ratio_pct:g}%  ·  "
-            f"pass2={'on' if c.enable_pass2_verify else 'off'}  ·  "
-            f"schema={c.step_schema or 'AP214'}"
+            f"Parameters from config.json:   workers={worker_lbl}  ·  views={c.num_views}  ·  "
+            f"grid={c.grid_resolution}  ·  min visible={c.min_visible_ratio_pct:g}%  ·  "
+            f"pass2={'on' if c.enable_pass2_verify else 'off'}  ·  schema={c.step_schema or 'AP214'}"
         )
         self._param_var2.set(
             f"Core fill={'on' if c.fill_internal_core else 'off'} "
@@ -584,57 +602,151 @@ class BatchPanel(tk.Frame):
 
         self._queue = list(targets)
         self._total = len(targets)
+        self._started_count = 0
         self._done_count = 0
         self._ok_count = 0
         self._failed_count = 0
         self._current_idx = None
         self._active_cmd_id = None
+        self._batch_concurrency = resolve_batch_workers(self._config.batch_workers, self._total)
         self._stop_requested = False
         self._running = True
 
         self._refresh_tree(selected=targets)
         self._update_controls()
         self._log_panel.set_busy(True)
-        self._log_panel.set_progress(0.0, f"Starting batch of {self._total} file(s)...")
+        self._log_panel.set_progress(
+            0.0,
+            f"Starting batch of {self._total} file(s) ({self._batch_concurrency} worker(s))...",
+        )
         self._log_panel.append_log(
-            f"RUN — {self._total} file(s) · schema={self._simp_cfg.step_schema} · "
-            f"views={self._vis_cfg.num_views} · grid={self._vis_cfg.grid_resolution} "
-            f"(params from {self._config_path.name})"
+            f"RUN — {self._total} file(s) · workers={self._batch_concurrency} "
+            f"(threads/worker={threads_per_batch_worker(self._batch_concurrency)}) · "
+            f"schema={self._simp_cfg.step_schema} · views={self._vis_cfg.num_views} · "
+            f"grid={self._vis_cfg.grid_resolution} (params from {self._config_path.name})"
         )
         self._advance()
 
+    def _active_slots(self) -> list[_WorkerSlot]:
+        return [s for s in self._slots if s.item_idx is not None]
+
+    def _clear_slot(self, slot: _WorkerSlot) -> None:
+        slot.item_idx = None
+        slot.cmd_id = None
+        slot.stage = ""
+        slot.file_progress = 0.0
+        active = self._active_slots()
+        if active:
+            self._current_idx = active[0].item_idx
+            self._active_cmd_id = active[0].cmd_id
+            self._stage = active[0].stage
+        else:
+            self._current_idx = None
+            self._active_cmd_id = None
+            self._stage = ""
+
     def _advance(self) -> None:
         if self._stop_requested:
-            self._finish_batch(stopped=True)
-            return
-        if not self._queue:
-            self._finish_batch(stopped=False)
+            if not self._active_slots():
+                self._finish_batch(stopped=True)
             return
 
-        idx = self._queue.pop(0)
-        self._current_idx = idx
-        item = self._items[idx]
-        item.status = ST_RUNNING
-        self._update_row(idx)
-        self._log_panel.append_log(
-            f"[{self._done_count + 1}/{self._total}] {item.path.name}  —  {item.path.parent}"
-        )
-        self._submit("load_step", {"path": str(item.path)})
+        if not self._queue:
+            if not self._active_slots():
+                self._finish_batch(stopped=False)
+            return
+
+        pool_size = max(1, min(self._batch_concurrency, len(self._queue) + len(self._active_slots())))
+        self._ensure_worker_pool(pool_size)
+
+        for slot in self._slots[:pool_size]:
+            if self._stop_requested or not self._queue:
+                break
+            if slot.item_idx is not None:
+                continue
+            idx = self._queue.pop(0)
+            self._started_count += 1
+            self._current_idx = idx
+            item = self._items[idx]
+            item.status = ST_RUNNING
+            self._update_row(idx)
+            worker_tag = f" [W{slot.slot_id + 1}]" if pool_size > 1 else ""
+            self._log_panel.append_log(
+                f"[{self._started_count}/{self._total}] {item.path.name}{worker_tag}  —  {item.path.parent}"
+            )
+            self._submit_slot(slot, idx, "load_step", {"path": str(item.path)})
 
     def ensure_worker(self) -> CadWorkerClient:
-        """Create the persistent CAD worker process on first use (lazy start)."""
-        if self._worker is None:
+        """Create the primary persistent CAD worker process on first use (lazy start)."""
+        if not self._slots:
             self._log_panel.append_log("Starting background CAD worker process...")
-            self._worker = CadWorkerClient()
+            client = CadWorkerClient()
+            self._slots.append(_WorkerSlot(slot_id=0, client=client))
+            self._worker = client
             if self._poll_after_id is None:
                 self._poll_after_id = self.after(40, self._poll_worker)
-        return self._worker
+        return self._slots[0].client
+
+    def _ensure_worker_pool(self, count: int) -> None:
+        """Ensure `count` persistent CAD workers are running with balanced thread budgets."""
+        count = max(1, int(count))
+        budget = threads_per_batch_worker(count)
+        self.ensure_worker()
+        # Update thread budget on any idle existing slots
+        for slot in self._slots[:count]:
+            if slot.item_idx is None:
+                slot.client.set_max_threads(budget)
+        while len(self._slots) < count:
+            sid = len(self._slots)
+            self._log_panel.append_log(
+                f"Starting parallel CAD worker #{sid + 1} (thread budget={budget})..."
+            )
+            client = CadWorkerClient(max_threads=budget)
+            self._slots.append(_WorkerSlot(slot_id=sid, client=client))
+        if self._poll_after_id is None:
+            self._poll_after_id = self.after(40, self._poll_worker)
+
+    def _submit_slot(
+        self, slot: _WorkerSlot, item_idx: int, cmd_name: str, payload: dict[str, Any]
+    ) -> None:
+        slot.item_idx = item_idx
+        slot.stage = cmd_name
+        lo, _ = self._STAGE_RANGES.get(cmd_name, (0.0, 1.0))
+        slot.file_progress = max(slot.file_progress, lo)
+        slot.cmd_id = slot.client.submit(cmd_name, payload)
+        self._stage = cmd_name
+        self._active_cmd_id = slot.cmd_id
+        self._current_idx = item_idx
 
     def _submit(self, cmd_name: str, payload: dict[str, Any]) -> None:
-        self._stage = cmd_name
-        self._active_cmd_id = self.ensure_worker().submit(cmd_name, payload)
+        self.ensure_worker()
+        slot = self._slots[0]
+        idx = slot.item_idx if slot.item_idx is not None else self._current_idx
+        if idx is not None:
+            self._submit_slot(slot, idx, cmd_name, payload)
+        else:
+            self._stage = cmd_name
+            self._active_cmd_id = slot.client.submit(cmd_name, payload)
 
-    def _on_progress(self, fraction: float, message: str) -> None:
+    def _on_progress(
+        self, fraction: float, message: str, slot: Optional[_WorkerSlot] = None
+    ) -> None:
+        if slot is not None:
+            lo, hi = self._STAGE_RANGES.get(slot.stage, (0.0, 1.0))
+            slot.file_progress = lo + (hi - lo) * max(0.0, min(1.0, float(fraction)))
+            active = self._active_slots()
+            in_flight = sum(s.file_progress for s in active)
+            overall = (self._done_count + in_flight) / max(1, self._total)
+            idx = slot.item_idx
+            name = self._items[idx].path.name if idx is not None else ""
+            label = self._STAGE_LABELS.get(slot.stage, "Working")
+            if len(active) > 1:
+                prefix = f"[{self._done_count}/{self._total} done · {len(active)} active]"
+            else:
+                prefix = f"[{min(self._done_count + 1, self._total)}/{self._total}]"
+            self._log_panel.set_progress(overall, f"{prefix} {label}: {name} — {message}")
+            return
+
         lo, hi = self._STAGE_RANGES.get(self._stage, (0.0, 1.0))
         local = lo + (hi - lo) * max(0.0, min(1.0, float(fraction)))
         overall = (self._done_count + local) / max(1, self._total)
@@ -649,31 +761,49 @@ class BatchPanel(tk.Frame):
         if not self._running or self._stop_requested:
             return
         self._stop_requested = True
-        if self._worker is not None:
-            self._worker.request_cancel()
+        for slot in self._slots:
+            if slot.item_idx is not None:
+                slot.client.request_cancel()
         self._update_controls()
         self._log_panel.append_log(
-            "Stop requested — aborting the current file; remaining files will be skipped."
+            "Stop requested — aborting active file(s); remaining files will be skipped."
         )
 
     def _on_force_stop(self) -> None:
         if not self._running:
             return
-        idx = self._current_idx
         self._stop_requested = True
-        if self._worker is not None:
-            self._worker.force_terminate_and_restart()
-        self._active_cmd_id = None
-        if idx is not None and 0 <= idx < len(self._items):
-            item = self._items[idx]
-            item.status = ST_CANCELLED
-            item.output_path = None
-            self._done_count += 1
-            self._failed_count += 1
-            self._update_row(idx)
-            self._log_panel.append_log(
-                f"■ Force stopped: {item.path.name} (background CAD worker restarted)"
-            )
+        active = self._active_slots()
+        if active:
+            for slot in active:
+                idx = slot.item_idx
+                slot.client.force_terminate_and_restart()
+                self._clear_slot(slot)
+                if idx is not None and 0 <= idx < len(self._items):
+                    item = self._items[idx]
+                    item.status = ST_CANCELLED
+                    item.output_path = None
+                    self._done_count += 1
+                    self._failed_count += 1
+                    self._update_row(idx)
+                    self._log_panel.append_log(
+                        f"■ Force stopped: {item.path.name} (background CAD worker restarted)"
+                    )
+        else:
+            idx = self._current_idx
+            if self._worker is not None:
+                self._worker.force_terminate_and_restart()
+            self._active_cmd_id = None
+            if idx is not None and 0 <= idx < len(self._items):
+                item = self._items[idx]
+                item.status = ST_CANCELLED
+                item.output_path = None
+                self._done_count += 1
+                self._failed_count += 1
+                self._update_row(idx)
+                self._log_panel.append_log(
+                    f"■ Force stopped: {item.path.name} (background CAD worker restarted)"
+                )
         self._finish_batch(stopped=True)
 
     def _finish_batch(self, stopped: bool) -> None:
@@ -684,6 +814,12 @@ class BatchPanel(tk.Frame):
                     self._items[idx].status = ST_SKIPPED
                     skipped += 1
             self._queue.clear()
+
+        for slot in self._slots:
+            slot.item_idx = None
+            slot.cmd_id = None
+            slot.stage = ""
+            slot.file_progress = 0.0
 
         # Safety net: an interrupted stage must never leave a row "Running"
         for item in self._items:
@@ -716,7 +852,7 @@ class BatchPanel(tk.Frame):
 
     def _poll_worker(self) -> None:
         self._poll_after_id = None
-        if self._worker is None:
+        if not self._slots:
             return
         try:
             if not self.winfo_exists():
@@ -724,39 +860,56 @@ class BatchPanel(tk.Frame):
         except tk.TclError:
             return
 
-        for ev in self._worker.poll_events():
-            if ev.kind == "worker_ready":
-                self._log_panel.append_log("✔ Background CAD worker ready")
-            elif ev.kind == "progress":
-                cmd_id, frac, msg = ev.payload
-                if cmd_id == self._active_cmd_id and self._running:
-                    self._on_progress(frac, msg)
-            elif ev.kind == "done":
-                cmd_id, cmd_name, res = ev.payload
-                if cmd_id != self._active_cmd_id or not self._running:
-                    continue
-                self._handle_stage_done(cmd_name, res)
-            elif ev.kind == "cancelled":
-                cmd_id, _cmd_name, msg = ev.payload
-                if cmd_id != self._active_cmd_id or not self._running:
-                    continue
-                self._handle_cancelled(msg)
-            elif ev.kind in ("error", "crashed"):
-                cmd_id = ev.payload[0]
-                if cmd_id != self._active_cmd_id or not self._running:
-                    continue
-                self._handle_failure(ev.payload[2], crashed=(ev.kind == "crashed"))
+        for slot in list(self._slots):
+            for ev in slot.client.poll_events():
+                if ev.kind == "worker_ready":
+                    tag = f" #{slot.slot_id + 1}" if slot.slot_id > 0 else ""
+                    self._log_panel.append_log(f"✔ Background CAD worker{tag} ready")
+                elif ev.kind == "progress":
+                    cmd_id, frac, msg = ev.payload
+                    if cmd_id == slot.cmd_id and self._running:
+                        self._on_progress(frac, msg, slot=slot)
+                elif ev.kind == "done":
+                    cmd_id, cmd_name, res = ev.payload
+                    if cmd_name == "configure_threads":
+                        continue
+                    if cmd_id != slot.cmd_id or not self._running:
+                        continue
+                    self._handle_stage_done(cmd_name, res, slot=slot)
+                elif ev.kind == "cancelled":
+                    cmd_id, _cmd_name, msg = ev.payload
+                    if cmd_id != slot.cmd_id or not self._running:
+                        continue
+                    self._handle_cancelled(msg, slot=slot)
+                elif ev.kind in ("error", "crashed"):
+                    cmd_id = ev.payload[0]
+                    if cmd_id != slot.cmd_id or not self._running:
+                        continue
+                    self._handle_failure(
+                        ev.payload[2], crashed=(ev.kind == "crashed"), slot=slot
+                    )
 
-        if self._worker is not None:
+        if self._slots:
             self._poll_after_id = self.after(40, self._poll_worker)
 
-    def _handle_stage_done(self, cmd_name: str, res: Any) -> None:
-        self._active_cmd_id = None
-        idx = self._current_idx
+    def _handle_stage_done(
+        self, cmd_name: str, res: Any, slot: Optional[_WorkerSlot] = None
+    ) -> None:
+        if slot is not None:
+            slot.cmd_id = None
+            idx = slot.item_idx
+        else:
+            self._active_cmd_id = None
+            idx = self._current_idx
+
         if idx is None or not (0 <= idx < len(self._items)):
-            self._finish_batch(stopped=True)
+            if slot is not None:
+                self._clear_slot(slot)
+            if not self._active_slots():
+                self._finish_batch(stopped=True)
             return
         item = self._items[idx]
+        prefix = f"    [{item.path.name}] " if self._batch_concurrency > 1 else "    "
 
         # Stop clicked while this stage was finishing: abort at the stage boundary.
         # (The worker clears its cancel event when a new command starts, so the batch
@@ -767,38 +920,52 @@ class BatchPanel(tk.Frame):
             stage_label = self._STAGE_LABELS.get(cmd_name, cmd_name)
             self._update_row(idx)
             self._log_panel.append_log(f"    Stopped after {stage_label}: {item.path.name}")
-            self._finish_batch(stopped=True)
+            if slot is not None:
+                self._clear_slot(slot)
+            if not self._active_slots():
+                self._finish_batch(stopped=True)
             return
 
         if cmd_name == "load_step":
             self._log_panel.append_log(
-                f"    Loaded {len(res['parts'])} part(s) · "
+                f"{prefix}Loaded {len(res['parts'])} part(s) · "
                 f"{res['total_volume']:,.0f} mm³ · unit {res['unit']}"
             )
-            self._submit("analyze_visibility", {"config": self._vis_cfg, "overrides": {}})
+            if slot is not None:
+                self._submit_slot(
+                    slot, idx, "analyze_visibility", {"config": self._vis_cfg, "overrides": {}}
+                )
+            else:
+                self._submit("analyze_visibility", {"config": self._vis_cfg, "overrides": {}})
             return
 
         if cmd_name == "analyze_visibility":
             self._log_panel.append_log(
-                f"    Visibility: keep {res['external_count']} external / "
+                f"{prefix}Visibility: keep {res['external_count']} external / "
                 f"drop {res['internal_count']} internal"
             )
-            self._submit("simplify", {"config": self._simp_cfg, "overrides": {}})
+            if slot is not None:
+                self._submit_slot(
+                    slot, idx, "simplify", {"config": self._simp_cfg, "overrides": {}}
+                )
+            else:
+                self._submit("simplify", {"config": self._simp_cfg, "overrides": {}})
             return
 
         if cmd_name == "simplify":
             v = res.validation
             self._log_panel.append_log(
-                f"    Solidified: solid={v.solid_count} · shell={v.shell_count} · "
+                f"{prefix}Solidified: solid={v.solid_count} · shell={v.shell_count} · "
                 f"faces={v.face_count:,} · fill +{res.filled_volume_delta:,.0f} mm³"
             )
             out_path = default_output_path(item.path)
             item.output_path = out_path
             self._update_row(idx)
-            self._submit(
-                "save_result",
-                {"output_path": str(out_path), "schema": self._simp_cfg.step_schema},
-            )
+            save_payload = {"output_path": str(out_path), "schema": self._simp_cfg.step_schema}
+            if slot is not None:
+                self._submit_slot(slot, idx, "save_result", save_payload)
+            else:
+                self._submit("save_result", save_payload)
             return
 
         if cmd_name == "save_result":
@@ -809,24 +976,38 @@ class BatchPanel(tk.Frame):
             self._done_count += 1
             self._ok_count += 1
             self._update_row(idx)
-            self._log_panel.append_log(f"    Saved: {saved} ({size_mb:.2f} MB)")
+            self._log_panel.append_log(f"{prefix}Saved: {saved} ({size_mb:.2f} MB)")
+            if slot is not None:
+                self._clear_slot(slot)
             if self._stop_requested:
-                self._finish_batch(stopped=True)
+                if not self._active_slots():
+                    self._finish_batch(stopped=True)
             else:
                 self._advance()
 
-    def _handle_cancelled(self, message: str) -> None:
-        self._active_cmd_id = None
-        idx = self._current_idx
+    def _handle_cancelled(self, message: str, slot: Optional[_WorkerSlot] = None) -> None:
+        if slot is not None:
+            idx = slot.item_idx
+            self._clear_slot(slot)
+        else:
+            self._active_cmd_id = None
+            idx = self._current_idx
         if idx is not None and 0 <= idx < len(self._items):
             self._items[idx].status = ST_CANCELLED
             self._update_row(idx)
         self._log_panel.append_log(f"■ Cancelled: {message}")
-        self._finish_batch(stopped=True)
+        if not self._active_slots():
+            self._finish_batch(stopped=True)
 
-    def _handle_failure(self, message: str, crashed: bool = False) -> None:
-        self._active_cmd_id = None
-        idx = self._current_idx
+    def _handle_failure(
+        self, message: str, crashed: bool = False, slot: Optional[_WorkerSlot] = None
+    ) -> None:
+        if slot is not None:
+            idx = slot.item_idx
+            self._clear_slot(slot)
+        else:
+            self._active_cmd_id = None
+            idx = self._current_idx
         if idx is not None and 0 <= idx < len(self._items):
             item = self._items[idx]
             item.status = ST_FAILED
@@ -840,7 +1021,8 @@ class BatchPanel(tk.Frame):
                 "    Background CAD worker crashed and was restarted — continuing with the next file."
             )
         if self._stop_requested:
-            self._finish_batch(stopped=True)
+            if not self._active_slots():
+                self._finish_batch(stopped=True)
         else:
             self._advance()
 
@@ -849,13 +1031,14 @@ class BatchPanel(tk.Frame):
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Stop polling and cleanly terminate the batch CAD worker process."""
+        """Stop polling and cleanly terminate all batch CAD worker processes."""
         if self._poll_after_id is not None:
             try:
                 self.after_cancel(self._poll_after_id)
             except Exception:
                 pass
             self._poll_after_id = None
-        if self._worker is not None:
-            self._worker.shutdown()
-            self._worker = None
+        for slot in self._slots:
+            slot.client.shutdown()
+        self._slots.clear()
+        self._worker = None

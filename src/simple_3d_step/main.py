@@ -3,41 +3,92 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
+from simple_3d_step.config import resolve_batch_workers, threads_per_batch_worker
 from simple_3d_step.models import SimplifyConfig, VisibilityConfig
 
 
-def _run_cli(args: argparse.Namespace) -> int:
+def _cli_process_one_file(
+    in_path_str: str,
+    out_path_str: str,
+    vis_cfg: VisibilityConfig,
+    simp_cfg: SimplifyConfig,
+    max_threads: Optional[int] = None,
+    verbose: bool = False,
+) -> dict:
+    """Process a single STEP file end-to-end (picklable top-level worker for CLI batch)."""
+    from simple_3d_step.core.occt_compat import configure_occt_parallelism
     from simple_3d_step.core.solidifier import simplify_assembly_to_single_solid
     from simple_3d_step.core.step_io import load_step_assembly, save_shape_to_step
     from simple_3d_step.core.visibility import analyze_visibility
 
-    in_path = Path(args.input).resolve()
-    out_path = (
-        Path(args.output).resolve()
-        if args.output
-        else in_path.with_name(f"{in_path.stem}_simplified.step")
-    )
+    configure_occt_parallelism(max_threads=max_threads)
+    t0 = time.perf_counter()
+
+    in_path = Path(in_path_str).resolve()
+    out_path = Path(out_path_str).resolve()
 
     def _log_prog(frac: float, msg: str) -> None:
-        print(f"[{frac * 100:5.1f}%] {msg}")
+        if verbose:
+            print(f"[{frac * 100:5.1f}%] {msg}")
 
-    print(f"Input STEP: {in_path}")
-    asm = load_step_assembly(in_path, progress_cb=_log_prog)
-    print(f"Loaded: {len(asm.parts)} parts")
+    if verbose:
+        print(f"Input STEP: {in_path}")
+    asm = load_step_assembly(in_path, progress_cb=_log_prog if verbose else None)
+    if verbose:
+        print(f"Loaded: {len(asm.parts)} parts")
 
+    vis = analyze_visibility(
+        asm,
+        vis_cfg,
+        progress_cb=_log_prog if verbose else None,
+        max_workers=max_threads,
+    )
+    if verbose:
+        print(
+            f"Visibility analysis: keep {vis.external_count} external / drop {vis.internal_count} internal"
+        )
+
+    res = simplify_assembly_to_single_solid(
+        asm,
+        simp_cfg,
+        progress_cb=_log_prog if verbose else None,
+        tessellated=vis.tessellated,
+        max_workers=max_threads,
+    )
+    saved = save_shape_to_step(res.shape, out_path, schema=simp_cfg.step_schema, unit=asm.unit)
+    v = res.validation
+
+    return {
+        "input": str(in_path),
+        "output": str(saved),
+        "size_bytes": saved.stat().st_size,
+        "mode_used": res.mode_used,
+        "elapsed_seconds": time.perf_counter() - t0,
+        "simplify_seconds": res.elapsed_seconds,
+        "solid_count": v.solid_count,
+        "shell_count": v.shell_count,
+        "face_count": v.face_count,
+        "is_watertight": v.is_watertight,
+        "volume": v.volume,
+        "filled_volume_delta": res.filled_volume_delta,
+        "face_types": dict(v.face_types),
+        "warnings": list(v.warnings),
+    }
+
+
+def _run_cli(args: argparse.Namespace) -> int:
     vis_cfg = VisibilityConfig(
         num_views=args.views,
         grid_resolution=args.grid,
         min_visible_ratio=args.min_visible / 100.0,
     )
-    vis = analyze_visibility(asm, vis_cfg, progress_cb=_log_prog)
-    print(f"Visibility analysis: keep {vis.external_count} external / drop {vis.internal_count} internal")
-
     simp_cfg = SimplifyConfig(
         fill_internal_core=not args.no_core,
         core_bridge_gap_mm=args.bridge_gap,
@@ -49,21 +100,105 @@ def _run_cli(args: argparse.Namespace) -> int:
         unify_same_domain=not args.no_unify,
         step_schema=args.schema,
     )
-    res = simplify_assembly_to_single_solid(asm, simp_cfg, progress_cb=_log_prog)
-    saved = save_shape_to_step(res.shape, out_path, schema=simp_cfg.step_schema, unit=asm.unit)
 
-    v = res.validation
-    print(f"\n=== Completed ({res.mode_used}, {res.elapsed_seconds:.2f}s) ===")
-    print(f"Output STEP: {saved} ({saved.stat().st_size / (1024 * 1024):.2f} MB)")
+    inputs: list[Path] = []
+    if args.input:
+        inputs.append(Path(args.input).resolve())
+    for extra in args.step_file:
+        p = Path(extra).resolve()
+        if p not in inputs:
+            inputs.append(p)
+
+    # Single-file CLI path (preserves exact existing output format)
+    if len(inputs) == 1:
+        in_path = inputs[0]
+        out_path = (
+            Path(args.output).resolve()
+            if args.output
+            else in_path.with_name(f"{in_path.stem}_simplified.step")
+        )
+        info = _cli_process_one_file(
+            str(in_path),
+            str(out_path),
+            vis_cfg,
+            simp_cfg,
+            max_threads=None,
+            verbose=True,
+        )
+        print(f"\n=== Completed ({info['mode_used']}, {info['simplify_seconds']:.2f}s) ===")
+        print(f"Output STEP: {info['output']} ({info['size_bytes'] / (1024 * 1024):.2f} MB)")
+        print(
+            f"Solid={info['solid_count']}, Shell={info['shell_count']}, Faces={info['face_count']:,}, "
+            f"Watertight={info['is_watertight']}, Volume={info['volume']:,.1f} mm³ (+{info['filled_volume_delta']:,.1f})"
+        )
+        if info["face_types"]:
+            print("Surface types:", info["face_types"])
+        for w in info["warnings"]:
+            print(f"  [Warning] {w}")
+        return 0
+
+    # Multi-file parallel CLI batch mode
+    workers = resolve_batch_workers(args.jobs, len(inputs))
+    per_worker_threads = threads_per_batch_worker(workers)
     print(
-        f"Solid={v.solid_count}, Shell={v.shell_count}, Faces={v.face_count:,}, "
-        f"Watertight={v.is_watertight}, Volume={v.volume:,.1f} mm³ (+{res.filled_volume_delta:,.1f})"
+        f"CLI Batch: {len(inputs)} file(s) using {workers} parallel worker(s) "
+        f"({per_worker_threads} threads/worker)"
     )
-    if v.face_types:
-        print("Surface types:", v.face_types)
-    for w in v.warnings:
-        print(f"  [Warning] {w}")
-    return 0
+    t_all = time.perf_counter()
+    ok_cnt = 0
+    fail_cnt = 0
+
+    if workers == 1:
+        for idx, in_path in enumerate(inputs, start=1):
+            out_path = in_path.with_name(f"{in_path.stem}_simplified.step")
+            try:
+                info = _cli_process_one_file(
+                    str(in_path), str(out_path), vis_cfg, simp_cfg, max_threads=None, verbose=False
+                )
+                ok_cnt += 1
+                print(
+                    f"[{idx}/{len(inputs)}] OK {in_path.name} -> {Path(info['output']).name} "
+                    f"({info['elapsed_seconds']:.2f}s, Solid={info['solid_count']}, Faces={info['face_count']:,})"
+                )
+            except Exception as exc:
+                fail_cnt += 1
+                print(f"[{idx}/{len(inputs)}] FAIL {in_path.name}: {exc}", file=sys.stderr)
+    else:
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+            fut_map = {}
+            for in_path in inputs:
+                out_path = in_path.with_name(f"{in_path.stem}_simplified.step")
+                fut = ex.submit(
+                    _cli_process_one_file,
+                    str(in_path),
+                    str(out_path),
+                    vis_cfg,
+                    simp_cfg,
+                    per_worker_threads,
+                    False,
+                )
+                fut_map[fut] = in_path
+
+            done_i = 0
+            for fut in as_completed(fut_map):
+                done_i += 1
+                in_path = fut_map[fut]
+                try:
+                    info = fut.result()
+                    ok_cnt += 1
+                    print(
+                        f"[{done_i}/{len(inputs)}] OK {in_path.name} -> {Path(info['output']).name} "
+                        f"({info['elapsed_seconds']:.2f}s, Solid={info['solid_count']}, Faces={info['face_count']:,})"
+                    )
+                except Exception as exc:
+                    fail_cnt += 1
+                    print(f"[{done_i}/{len(inputs)}] FAIL {in_path.name}: {exc}", file=sys.stderr)
+
+    print(
+        f"\n=== Batch Completed: {ok_cnt} succeeded, {fail_cnt} failed in {time.perf_counter() - t_all:.2f}s ==="
+    )
+    return 0 if fail_cnt == 0 else 1
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -97,6 +232,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--max-hole-dia", type=float, default=10.0, help="Max diameter for small hole plugging (mm)")
     parser.add_argument("--no-unify", action="store_true", help="Disable UnifySameDomain face merging")
     parser.add_argument("--schema", choices=("AP214", "AP242", "AP203"), default="AP214")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=0,
+        help="Parallel worker processes for multi-file CLI batch (0 = Auto)",
+    )
 
     args = parser.parse_args(argv)
 

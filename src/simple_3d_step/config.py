@@ -41,6 +41,28 @@ class AppConfig:
     keep_largest_only: bool = True
     step_schema: str = "AP214"
 
+    # Parallel batch worker count (0 = Auto based on CPU cores)
+    batch_workers: int = 0
+
+
+def resolve_batch_workers(configured: int = 0, task_count: int = 0) -> int:
+    """Resolve concurrent batch CAD worker process count (0 = Auto)."""
+    cpu_cnt = max(1, os.cpu_count() or 1)
+    if int(configured) > 0:
+        workers = min(int(configured), cpu_cnt)
+    else:
+        # Auto: balance CPU utilization vs per-worker OCCT/Embree RAM footprint (~0.5-2 GB/worker)
+        workers = min(6, max(1, cpu_cnt // 4))
+    if task_count > 0:
+        workers = min(workers, task_count)
+    return max(1, workers)
+
+
+def threads_per_batch_worker(num_workers: int) -> int:
+    """Compute per-worker C++/Embree thread budget to prevent core oversubscription."""
+    cpu_cnt = max(1, os.cpu_count() or 1)
+    return max(1, cpu_cnt // max(1, int(num_workers)))
+
 
 def get_default_config_path() -> Path:
     """Return the path to config.json in the project root / current working directory."""

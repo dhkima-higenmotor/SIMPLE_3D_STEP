@@ -14,7 +14,7 @@ so the text doubles as a map from theory to code.
 3. [Two-pass exterior visibility analysis](#3-two-pass-exterior-visibility-analysis)
 4. [Exact B-Rep solidification](#4-exact-b-rep-solidification)
 5. [Cross-kernel STEP normalization](#5-cross-kernel-step-normalization)
-6. [Freeze-free GUI architecture](#6-freeze-free-gui-architecture)
+6. [Freeze-free GUI and multi-core architecture](#6-freeze-free-gui-and-multi-core-architecture)
 7. [Complexity and parameter guide](#7-complexity-and-parameter-guide)
 8. [Assumptions and limitations](#8-assumptions-and-limitations)
 9. [References](#9-references)
@@ -157,6 +157,23 @@ $$
 \alpha = 0.5\ \text{rad}.
 $$
 
+Because OCCT's Python bindings (OCP) hold the Python GIL during C++ calls while
+`BRepMesh_IncrementalMesh(..., theInParallel=True)` distributes all faces inside a single
+call across OCCT's native C++ thread pool (`OSD_Parallel`), meshing parts one-by-one would
+starve multi-core CPUs on small components. The implementation therefore groups parts into
+logarithmic deflection buckets (`mesh_shapes_in_parallel_buckets`),
+
+$$
+b_i = \left\lfloor \frac{\ln \delta_i}{\ln 1.5} \right\rfloor,
+\qquad
+\delta_{\text{bucket}}(b) = \min_{i:\, b_i = b} \delta_i ,
+$$
+
+wraps each bucket in a `TopoDS_Compound`, and meshes finest buckets first so every face
+receives a deflection at least as fine as $\delta_i$ while saturating all C++ threads.
+Instance placement transforms (`TopLoc_Location`) are applied per face as a vectorized
+$3\times 4$ affine matrix in NumPy (`extract_shape_triangles`).
+
 Triangles are appended in a single global buffer with parallel arrays
 
 $$
@@ -170,7 +187,9 @@ Winding is corrected for `TopAbs_REVERSED` faces so $\hat{\mathbf{n}}_t$ points 
 and the `trimesh.Trimesh` is built with `process=False` so triangle indices are **not**
 merged or reordered. That invariant is what lets a triangle hit be traced back to an
 exact `TopAbs_FACE` of an exact `PartNode` — the bridge between the approximate
-visibility decision and the exact B-Rep output.
+visibility decision and the exact B-Rep output. The cached `TessellatedAssembly` is also
+reused during solidification (`build_subset_trimesh`) so the kept parts are never
+re-tessellated from scratch.
 
 ### 3.2 Fibonacci sphere viewpoints
 
@@ -217,12 +236,19 @@ which turns the per-view sampling lattices into a low-discrepancy union and prev
 systematic aliasing of thin ribs, fins, and bolt heads.
 
 Each ray is intersected with the BVH (`trimesh` ray intersector backed by Intel Embree)
-using **first hit only**:
+using **first hit only** (`intersects_first`):
 
 $$
 h_t \in \{0,1\},\qquad
 H_i = \sum_{t\in \text{part } i} h_t .
 $$
+
+Because `embreex` releases the Python GIL (`nogil`) during `EmbreeScene.run()` while
+running a single-threaded C++ loop per call, the BVH is committed once on the main thread
+and views are dispatched concurrently across a `ThreadPoolExecutor` (capped at $\le 12$
+threads per worker, where shared-BVH memory bandwidth saturates). Each completed view's
+hit indices are accumulated on the main thread via `np.bincount`, yielding bit-for-bit
+identical counts to single-threaded execution.
 
 ### 3.4 From hits to exposed area (Cauchy integral geometry)
 
@@ -292,6 +318,10 @@ e_i = \frac{1}{n_s K}\sum_{s=1}^{n_s}\sum_{j=1}^{K}
 \mathbf{1}\!\left[\text{ray }(s,j)\text{ escapes}\right].
 $$
 
+Random surface samples are drawn sequentially on the main thread (`default_rng(42)`) before
+dispatching the `intersects_any` batches to the same `ThreadPoolExecutor`, preserving
+exact RNG determinism across any thread count.
+
 ### 3.6 Classification rule
 
 The visibility score merges both passes:
@@ -331,10 +361,10 @@ solid. It only (a) builds new **strictly interior** analytic material and (b) ap
 
 ### 4.1 Healing
 
-Each kept shape is checked with `BRepCheck_Analyzer`; invalid shapes go through
-`ShapeFix_Shape`. Free shells are promoted to solids with
-`BRepBuilderAPI_MakeSolid` + `ShapeFix_Solid`. A part that cannot be healed is excluded
-from the fuse and reported.
+Each kept shape is checked with `BRepCheck_Analyzer(..., parallel=True)` (C++ parallel
+validation via `make_brep_check_analyzer`); invalid shapes go through `ShapeFix_Shape`.
+Free shells are promoted to solids with `BRepBuilderAPI_MakeSolid` + `ShapeFix_Solid`. A
+part that cannot be healed is excluded from the fuse and reported.
 
 ### 4.2 Optional small-hole plugging (off by default)
 
@@ -374,8 +404,12 @@ $$
 
 where $g$ = `core_bridge_gap_mm`.
 
-**Occupancy.** Three axis-aligned Embree sweeps (rays along X, Y, Z) mark every voxel that
-contains a surface intersection (`multiple_hits=True`):
+**Occupancy.** The kept-part triangle mesh is extracted directly from the cached
+`TessellatedAssembly` (`build_subset_trimesh`, falling back to parallel bucketed meshing if
+called standalone). After pre-warming the Embree BVH and trimesh face caches on the main
+thread, three axis-aligned Embree sweeps (rays along X, Y, Z, split into tiles of 4,096
+rays and run across a `ThreadPoolExecutor`) mark every voxel that contains a surface
+intersection (`multiple_hits=True`):
 
 $$
 O[i,j,k] = \mathbf{1}\!\left[\text{some ray hit voxel }(i,j,k)\right].
@@ -442,9 +476,10 @@ $$
 x \text{ is carved if } \varsigma(x)\ge 0.15 .
 $$
 
-Carved voxels are dilated by one voxel as a safety margin. The 15 % threshold tolerates
-narrow slits and draft angles while still catching anything with a wide-open line of
-sight to the outside (heatsink fin gaps, counterbores, cable channels).
+Carved voxels are dilated by one voxel as a safety margin. Candidate voxels are evaluated
+in 4,000-voxel chunks across the same `ThreadPoolExecutor` (`intersects_any`). The 15 %
+threshold tolerates narrow slits and draft angles while still catching anything with a
+wide-open line of sight to the outside (heatsink fin gaps, counterbores, cable channels).
 
 **Slicing axis.** For each axis, up to 12 cross-sections $C$ are scored by circularity
 
@@ -457,20 +492,34 @@ and the axis with the largest mean $\kappa$ is used as the extrusion direction. 
 the axis that produces the roundest cross-sections maximizes the number of analytic
 cylinders (cheap, smooth) and minimizes polygon approximation error.
 
-**Analytic primitive extraction.** The core is processed in slabs of
-$w=\max(2,\operatorname{round}(3/h))$ voxels (≈3 mm), stepping by $w$ with an overlap
-$\max(0.25,0.45h)$ to avoid seams. Within slab $k$ the cross-section is the **intersection**
-of all voxel slices in the slab,
+**Analytic primitive extraction.** Starting from a base slab thickness of
+$w=\max(2,\operatorname{round}(3/h))$ voxels (≈3 mm), each slab is **greedily extended**
+along the slice axis while the cumulative cross-section remains constant:
+
+$$
+\frac{\left|\,\bigcap_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
+     {\left|\,\bigcup_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
+\;\ge\; 0.94 ,
+$$
+
+with an overlap $\max(0.25,0.45h)$ between consecutive slabs to avoid seams. Within slab
+$k$ the cross-section is always the **intersection** of all voxel slices in the slab,
 
 $$
 C_k = \bigcap_{j\in\text{slab}} C_{\text{safe}}[:,:,j],
 $$
 
-so containment is guaranteed even where the cavity tapers. Holes are filled, connected
-components smaller than 20 mm² are dropped, and each component becomes either
+so strict containment inside $C_{\text{safe}}$ is guaranteed even where the cavity tapers,
+while long uniform bores and rectangular housings collapse into single tall primitives
+rather than dozens of 3 mm slices. Holes are filled, connected components smaller than
+20 mm² are dropped, and each component becomes either
 
 - a **cylinder** if its inscribed radius $r^*=h\max\operatorname{EDT}$ satisfies
-  $r^*\ge 2.5$ mm and $\pi r^{*2}/|C_k|\ge 0.84$, with radius $\max(r^*-0.1,0.5)$ mm; or
+  $r^*\ge 2.5$ mm and $\pi r^{*2}/|C_k|\ge 0.84$, with radius $\max(r^*-0.1,0.5)$ mm;
+  adjacent coaxial cylinders (center shift $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$
+  mm) are further coalesced into one cylinder with conservative radius
+  $r_{\text{merged}} = \min(r_1, r_2) - \tfrac{1}{2}\Delta c$ so the merged body stays
+  strictly contained inside both original cylinders; or
 - a **polygonal prism** built from the largest contour, simplified with
   `approximate_polygon` at tolerance $\max(0.75, 0.55/h)$ **contour pixels**, extruded
   along the slice axis.
@@ -503,8 +552,9 @@ shape that has lost one operand (tangent-face collapse, disjoint tools, toleranc
 swallowing). Only if exact fusion fails or fails the guard is the tolerance raised, one
 step at a time.
 
-The batch path is stricter: a single multi-tool `BRepAlgoAPI_Fuse` is attempted **only** at
-fuzzy $=0$, accepted if
+The batch path is stricter: a single multi-tool `BRepAlgoAPI_Fuse` (`SetRunParallel(True)`
+with global `BOPAlgo_Options.SetParallelMode_s(True)`) is attempted **only** at fuzzy $=0$,
+accepted if
 
 $$
 V_{\text{fused}} \ge 0.99\max_i v_i
@@ -512,9 +562,13 @@ V_{\text{fused}} \ge 0.99\max_i v_i
 V_{\text{fused}} \le 1.01\sum_i v_i + 1,
 $$
 
-otherwise the code falls back to progressive pairwise fusion where each pair restarts the
-schedule at fuzzy $=0$. A globally loosened batch tolerance would corrupt *all* tangent
-contacts at once; per-pair escalation localizes the damage.
+otherwise the code falls back to a **spatial-proximity balanced binary-tree fuse**: at each
+tree level, operands are greedily paired by nearest bounding-box center so touching bodies
+merge into balanced sub-assemblies ($O(N\log N)$ face-intersection growth rather than an
+$O(N^2)$ linear accumulator chain), restarting each pair's fuzzy schedule at $0$ (with a
+sequential rescue pass only if an entire round yields zero merges). A globally loosened
+batch tolerance would corrupt *all* tangent contacts at once; per-pair escalation localizes
+the damage.
 
 **Two tiers.** Parts with $v_i \ge 0.015\sum_j v_j$ (housings, covers, rotors — at least
 1.5 % of kept volume) plus the analytic core are fused first, and closed void shells are
@@ -552,10 +606,14 @@ V_F=\{\text{faces}\},\qquad
 (u,v)\in E_F \iff u \text{ and } v \text{ share a B-Rep edge}.
 $$
 
-Connected components of $G_F$ are computed by BFS. The outermost component (largest
-bounding-box diagonal, ties broken by face count) is rebuilt into a shell
-(`BRep_Builder`), converted to a solid, healed with `ShapeFix_Solid`, oriented outward with
-`BRepLib.OrientClosedSolid`, and accepted if
+Connected components of $G_F$ are computed by BFS. In OCP 8.x, iterating
+`MapShapesAndAncestors` shape lists in Python incurs heavy per-edge binding overhead, so
+$G_F$ is built in reverse via `TopExp.MapShapes_s` on faces and edges plus a per-face
+`TopExp_Explorer(..., TopAbs_EDGE)` lookup (an order-of-magnitude faster while yielding the
+exact same adjacency graph). The outermost component (largest bounding-box diagonal, ties
+broken by face count) is rebuilt into a shell (`BRep_Builder`), converted to a solid,
+healed with `ShapeFix_Solid`, oriented outward with `BRepLib.OrientClosedSolid`, and
+accepted if
 
 $$
 V' \ge 0.95\,V .
@@ -571,8 +629,9 @@ pins** rather than deleted. With the main body $M$ (largest volume) and island $
 
 1. Skip if $I$ lies strictly inside $M$: bounding boxes nested **and**
    `BRepClass3d_SolidClassifier(M, \text{centroid}(I)) == TopAbs_IN`.
-2. Compute the closest vertex pair between tessellated surfaces (deflection 0.25 mm,
-   `cKDTree` query):
+2. Compute the closest vertex pair between tessellated surfaces (main body and islands
+   batch-meshed together at 0.25 mm via `mesh_shapes_in_parallel_buckets`, queried in
+   parallel via `cKDTree.query(..., workers=-1)`):
 
 $$
 d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
@@ -688,7 +747,7 @@ $$
 
 `validate_shape` reports exact B-Rep metrics:
 
-- `BRepCheck_Analyzer` topological validity,
+- `BRepCheck_Analyzer(..., parallel=True)` multi-threaded topological/geometric validity,
 - solid/shell counts (`TopExp_Explorer`),
 - free edges via `ShapeAnalysis_FreeBounds` (closed wires + open wires),
 - volume/surface area (`BRepGProp`), bounding box, and analytic surface-type histogram.
@@ -705,7 +764,7 @@ $N_{\text{free edges}}=0$ is watertightness.
 
 ---
 
-## 6. Freeze-free GUI architecture
+## 6. Freeze-free GUI and multi-core architecture
 
 OCCT C++ calls (STEP read/write, Booleans, `UnifySameDomain`) hold the Python GIL for
 seconds. Running them in the Tk event thread produces `Not Responding` windows. The GUI is
@@ -730,30 +789,34 @@ sequenceDiagram
     UI->>W: (cmd_id, "save_result", {output_path, schema})
 ```
 
-- **Liveness.** The GUI polls the event queue every 40 ms (`after(40, ...)`) and never
-  blocks, so worst-case UI latency is one poll interval regardless of C++ duration.
+- **Liveness.** The GUI polls all active worker event queues every 40 ms (`after(40, ...)`)
+  and never blocks, so worst-case UI latency is one poll interval regardless of C++ duration.
 - **Cancellation.** A shared cancel event is checked at coarse checkpoints (per part, per
   view, per slab, per fuse pair). A C++ kernel call itself is not interruptible; the
-  *Force Stop* action terminates the worker process and respawns it (`spawn` context), at
-  the cost of losing the in-memory assembly (the GUI reloads on demand).
+  *Force Stop* action terminates the active worker process(es) and respawns clean
+  replacements (`spawn` context), at the cost of losing the in-memory assembly (Single Mode
+  reloads on demand).
 - **Crash containment.** Worker death is detected during polling and reported as a crash;
   the worker restarts automatically.
-- **Mode isolation.** Single Mode and Batch Mode each own a worker (Batch Mode starts it
-  lazily on first tab activation), so a long batch never blocks interactive inspection,
-  and each mode's in-memory assembly stays valid.
+- **Mode isolation.** Single Mode owns one dedicated worker and Batch Mode owns a lazily
+  started worker pool (first slot created on tab activation; additional slots spawned up to
+  `batch_workers` when RUN starts), so a long batch never blocks interactive inspection and
+  each mode's in-memory assembly stays valid.
 
-### 6.2 Batch-mode state machine
+### 6.2 Batch-mode parallel state machine
 
 A batch item moves through `Pending → Running → Done | Failed | Cancelled | Skipped`.
-Each file runs the same four stages in the worker. The overall progress is
+Up to $W$ files execute concurrently in separate persistent CAD worker slots (`_WorkerSlot`),
+each advancing its assigned file through the same four stages. Overall progress aggregates
+finished files and all in-flight slots:
 
 $$
-p=\frac{n_{\text{done}}+\ell}{n_{\text{total}}},
-\qquad 0 \le \ell < 1 ,
+p=\frac{n_{\text{done}}+\sum_{s\in\text{active}}\ell_s}{n_{\text{total}}},
+\qquad 0 \le \ell_s < 1 ,
 $$
 
-where $n_{\text{done}}$ is the number of finished files and $\ell$ is the fraction
-completed inside the current stage's band:
+where $n_{\text{done}}$ is the number of finished files and $\ell_s$ is slot $s$'s fraction
+completed inside its current stage's band:
 
 | Stage | Command | Band |
 | :--- | :--- | :---: |
@@ -770,6 +833,39 @@ Double-clicking a queue row whose output already exists launches the configured 
 STEP viewer (`viewer_executable` / `viewer_args` in `config.json`, with the Windows default
 association as fallback) — the same viewer integration used by Single Mode, so both modes
 review results with identical settings.
+
+### 6.3 Multi-core execution and thread budgeting
+
+The pipeline combines **intra-process native/nogil parallelism** (accelerating a single
+STEP file) with **inter-process file-level parallelism** (accelerating GUI Batch Mode and
+CLI `--cli ... -j` runs, including OCCT stages that are inherently single-threaded such as
+`STEPCAFControl_Reader`, `ShapeUpgrade_UnifySameDomain`, `ShapeFix_*`, and `STEPControl_Writer`):
+
+| Parallelism layer | Mechanism | Stages accelerated |
+| :--- | :--- | :--- |
+| OCCT C++ pool (`OSD_Parallel`) | `BRepMesh_IncrementalMesh(..., True)`, `BOPAlgo_Options.SetParallelMode_s(True)`, `BRepCheck_Analyzer(..., True)` | Bucketed tessellation, Boolean Fuse, Defeaturing, B-Rep validation |
+| Python `ThreadPoolExecutor` (`nogil`) | Concurrent `embreex` queries on pre-committed BVH; `cKDTree(workers=-1)` | Visibility Pass 1 & Pass 2, core 3-axis sweep & 26-dir sky carving, island distance search |
+| Multi-process worker pool (`spawn`) | $W$ persistent `CadWorkerClient` slots (GUI Batch) or `ProcessPoolExecutor` (CLI `-j`) | Full end-to-end pipeline across multiple STEP files |
+
+To prevent nested-parallelism thread oversubscription ($W \times C$ threads thrashing CPU
+caches) and keep per-worker RAM bounded (~0.5–2 GB per large assembly), worker count $W$
+and per-worker thread budget $T_{\text{worker}}$ are computed on a machine with $C$ logical
+cores as (`config.py::resolve_batch_workers`, `threads_per_batch_worker`):
+
+$$
+W = \min\!\left(n_{\text{files}},\ 
+\begin{cases}
+\min(w_{\text{cfg}},\ C) & w_{\text{cfg}} > 0,\\[2pt]
+\min\!\left(6,\ \max\!\left(1,\ \lfloor C/4 \rfloor\right)\right) & w_{\text{cfg}} = 0\ (\text{Auto}),
+\end{cases}\right)
+\qquad
+T_{\text{worker}} = \max\!\left(1,\ \lfloor C / W \rfloor\right).
+$$
+
+Each worker configures OCCT's `OSD_ThreadPool.DefaultPool_s().Init(T_worker)` (via
+`configure_occt_parallelism`) and caps its Embree `ThreadPoolExecutor` at
+$\min(T_{\text{worker}}, 12)$ threads. Existing idle workers update their thread budget
+dynamically via the `"configure_threads"` IPC command before each batch run.
 
 ---
 
@@ -815,6 +911,7 @@ drops.
 | `unify_same_domain` | on | face compaction, guarded |
 | `keep_largest_only` | on | discards unbridgeable islands instead of exporting a compound |
 | `step_schema` | AP214 | AP214 / AP242 / AP203 |
+| `batch_workers` / CLI `-j` | 0 (Auto) | concurrent CAD worker processes in Batch Mode / multi-file CLI (`0` = auto up to 6 with per-worker thread budgeting) |
 
 The inset and the grid pitch are coupled: the code enforces
 $\text{inset} \ge 1.6h$, so a coarser grid automatically widens the protected shell. If a

@@ -13,7 +13,7 @@
 3. [2-Pass 외관 가시성 분석](#3-2-pass-외관-가시성-분석)
 4. [정밀 B-Rep 솔리드화](#4-정밀-b-rep-솔리드화)
 5. [크로스 커널 STEP 정규화](#5-크로스-커널-step-정규화)
-6. [프리징 없는 GUI 아키텍처](#6-프리징-없는-gui-아키텍처)
+6. [프리징 없는 GUI 및 멀티코어 아키텍처](#6-프리징-없는-gui-및-멀티코어-아키텍처)
 7. [복잡도와 파라미터 가이드](#7-복잡도와-파라미터-가이드)
 8. [가정과 한계](#8-가정과-한계)
 9. [참고문헌](#9-참고문헌)
@@ -153,6 +153,23 @@ $$
 \alpha = 0.5\ \text{rad}.
 $$
 
+OCCT 의 Python 바인딩(OCP)은 C++ 호출 동안 Python GIL 을 점유하는 반면,
+`BRepMesh_IncrementalMesh(..., theInParallel=True)` 는 단일 호출 내부의 모든 면을
+OCCT 네이티브 C++ 스레드 풀(`OSD_Parallel`)에 분배합니다. 따라서 부품을 하나씩
+메싱하면 소형 부품에서 멀티코어 CPU 가 유휴 상태가 됩니다. 구현은 부품을 로그 편차
+버킷으로 묶어(`mesh_shapes_in_parallel_buckets`)
+
+$$
+b_i = \left\lfloor \frac{\ln \delta_i}{\ln 1.5} \right\rfloor,
+\qquad
+\delta_{\text{bucket}}(b) = \min_{i:\, b_i = b} \delta_i ,
+$$
+
+버킷별 `TopoDS_Compound` 를 구성하고 가장 조밀한 버킷부터 일괄 메싱하므로, 모든 면이
+항상 $\delta_i$ 이하의 편차 정밀도를 보장받으면서 전체 C++ 스레드를 포화시킵니다.
+인스턴스 배치 변환(`TopLoc_Location`)은 면당 $3\times 4$ 아핀 행렬 NumPy 벡터 연산으로
+적용됩니다(`extract_shape_triangles`).
+
 삼각형은 단일 전역 버퍼에 병렬 배열과 함께 추가됩니다.
 
 $$
@@ -166,7 +183,8 @@ $$
 보정하고, `trimesh.Trimesh` 는 `process=False` 로 생성해 삼각형 인덱스가 **병합되거나
 재정렬되지 않도록** 합니다. 덕분에 하나의 삼각형 히트를 정확한 `PartNode` 의 정확한
 `TopAbs_FACE` 로 역추적할 수 있습니다. 이것이 근사적 가시성 판정과 정밀 B-Rep 출력을
-연결하는 다리입니다.
+연결하는 다리이며, 캐시된 `TessellatedAssembly` 는 이후 솔리드화 단계의 내부 코어
+생성에서도 재사용되어(`build_subset_trimesh`) 유지 부품을 다시 테셀레이션하지 않습니다.
 
 ### 3.2 Fibonacci 구면 시점
 
@@ -214,12 +232,18 @@ $$
 이 지터는 시점별 샘플링 격자를 저불일치(low-discrepancy) 합집합으로 만들어 얇은 리브,
 방열핀, 볼트 머리의 체계적 앨리어싱을 막습니다.
 
-각 광선은 BVH(`trimesh` 광선 인터섹터, Intel Embree 기반)와 **첫 히트만** 교차합니다.
+각 광선은 BVH(`trimesh` 광선 인터섹터, Intel Embree 기반)와 **첫 히트만** 교차합니다(`intersects_first`).
 
 $$
 h_t \in \{0,1\},\qquad
 H_i = \sum_{t\in \text{part } i} h_t .
 $$
+
+`embreex` 는 `EmbreeScene.run()` 내부에서 단일 C++ 루프를 실행하되 Python GIL 을
+해제(`nogil`)하므로, 메인 스레드에서 BVH 를 1회 커밋한 뒤 시점들을 `ThreadPoolExecutor`
+(공유 BVH 메모리 대역폭 포화 지점인 워커당 최대 12스레드)로 병렬 실행합니다. 완료된
+시점의 히트 인덱스는 메인 스레드에서 `np.bincount` 로 누적하여 단일 스레드 실행과
+비트 단위로 완전히 동일한 결과를 보장합니다.
 
 ### 3.4 히트 수에서 노출 면적으로 (Cauchy 적분 기하학)
 
@@ -290,6 +314,10 @@ e_i = \frac{1}{n_s K}\sum_{s=1}^{n_s}\sum_{j=1}^{K}
 \mathbf{1}\!\left[\text{ray }(s,j)\text{ escapes}\right].
 $$
 
+무작위 표면 샘플은 메인 스레드(`default_rng(42)`)에서 결정론적 순서로 먼저 생성한 뒤
+`intersects_any` 배치만 동일한 `ThreadPoolExecutor` 로 분배하므로, 스레드 수와 무관하게
+정확한 RNG 결정성이 유지됩니다.
+
 ### 3.6 분류 규칙
 
 가시성 점수는 두 패스를 합칩니다.
@@ -329,9 +357,10 @@ $$
 
 ### 4.1 힐링
 
-유지된 각 형상은 `BRepCheck_Analyzer` 로 검사하고, 유효하지 않으면 `ShapeFix_Shape` 로
-복구합니다. 자유 껍질(shell)은 `BRepBuilderAPI_MakeSolid` + `ShapeFix_Solid` 로
-솔리드로 승격합니다. 힐링에 실패한 부품은 Fuse 대상에서 제외하고 리포트합니다.
+유지된 각 형상은 `BRepCheck_Analyzer(..., parallel=True)`(`make_brep_check_analyzer` 를
+통한 C++ 병렬 검증)로 검사하고, 유효하지 않으면 `ShapeFix_Shape` 로 복구합니다. 자유
+껍질(shell)은 `BRepBuilderAPI_MakeSolid` + `ShapeFix_Solid` 로 솔리드로 승격합니다.
+힐링에 실패한 부품은 Fuse 대상에서 제외하고 리포트합니다.
 
 ### 4.2 선택적 소형 홀 메우기 (기본 비활성)
 
@@ -371,8 +400,11 @@ $$
 
 여기서 $g$ 는 `core_bridge_gap_mm` 입니다.
 
-**점유(occupancy).** X, Y, Z 축 방향의 Embree 스윕 3회로 표면 교차점을 포함하는 모든
-복셀을 표시합니다(`multiple_hits=True`).
+**점유(occupancy).** 유지 부품의 삼각 메쉬는 캐시된 `TessellatedAssembly` 에서 곧바로
+추출합니다(`build_subset_trimesh`, 단독 호출 시에는 병렬 버킷 메싱 폴백). 메인
+스레드에서 Embree BVH 와 `trimesh` 면 캐시를 사전 초기화한 뒤, X, Y, Z 축 방향의
+Embree 스윕 3회를 4,096개 광선 타일로 나누어 `ThreadPoolExecutor` 로 병렬 실행하고
+표면 교차점을 포함하는 모든 복셀을 표시합니다(`multiple_hits=True`).
 
 $$
 O[i,j,k] = \mathbf{1}\!\left[\text{some ray hit voxel }(i,j,k)\right].
@@ -438,9 +470,10 @@ $$
 x \text{ is carved if } \varsigma(x)\ge 0.15 .
 $$
 
-제거된 복셀은 안전 여백으로 1복셀 팽창합니다. 15 % 임계값은 좁은 슬릿과 드래프트
-각도는 허용하면서, 외부로 시야가 넓게 열린 영역(방열핀 사이, 카운터보어, 케이블
-채널)은 확실히 걸러냅니다.
+제거된 복셀은 안전 여백으로 1복셀 팽창합니다. 후보 복셀은 4,000개 청크 단위로
+동일한 `ThreadPoolExecutor` 에서 병렬 평가합니다(`intersects_any`). 15 % 임계값은
+좁은 슬릿과 드래프트 각도는 허용하면서, 외부로 시야가 넓게 열린 영역(방열핀 사이,
+카운터보어, 케이블 채널)은 확실히 걸러냅니다.
 
 **슬라이싱 축.** 축마다 최대 12개 단면 $C$ 를 원형도로 평가합니다.
 
@@ -452,19 +485,33 @@ $$
 평균 $\kappa$ 가 가장 큰 축을 압출 방향으로 사용합니다. 가장 둥근 단면을 만드는 축을
 고르면 해석적 원통(저렴하고 매끄러움)의 수가 최대화되고 폴리곤 근사 오차가 최소화됩니다.
 
-**해석적 프리미티브 추출.** 코어는 $w=\max(2,\operatorname{round}(3/h))$ 복셀(≈3 mm)
-두께의 슬래브로 처리하며, 이음새를 피하려고 $\max(0.25,0.45h)$ 만큼 겹쳐 진행합니다.
-슬래브 $k$ 의 단면은 슬래브 내 모든 복셀 슬라이스의 **교집합**입니다.
+**해석적 프리미티브 추출.** 기본 슬래브 두께 $w=\max(2,\operatorname{round}(3/h))$
+복셀(≈3 mm)에서 출발해, 누적 단면이 일정하게 유지되는 동안 슬라이스 축 방향으로
+슬래브를 **탐욕적으로 확장**합니다.
+
+$$
+\frac{\left|\,\bigcap_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
+     {\left|\,\bigcup_{j=w_0}^{w_{\text{end}}+1} C_{\text{safe}}[:,:,j]\,\right|}
+\;\ge\; 0.94 ,
+$$
+
+연속 슬래브 사이는 이음새를 피하려고 $\max(0.25,0.45h)$ 만큼 겹쳐 진행합니다. 슬래브
+$k$ 의 단면은 항상 슬래브 내 모든 복셀 슬라이스의 **교집합**입니다.
 
 $$
 C_k = \bigcap_{j\in\text{slab}} C_{\text{safe}}[:,:,j],
 $$
 
-따라서 공동이 좁아지는 구간에서도 포함(containment)이 보장됩니다. 구멍을 채우고
-20 mm² 미만의 연결 요소는 버린 뒤, 각 요소를 다음 중 하나로 만듭니다.
+따라서 공동이 좁아지는 구간에서도 $C_{\text{safe}}$ 내부 포함(containment)이
+보장되면서, 긴 직선 보어나 사각 하우징은 수십 개의 3 mm 슬라이스 대신 하나의 긴 해석적
+프리미티브로 통합됩니다. 구멍을 채우고 20 mm² 미만의 연결 요소는 버린 뒤, 각 요소를
+다음 중 하나로 만듭니다.
 
 - 내접 반지름 $r^*=h\max\operatorname{EDT}$ 가 $r^*\ge 2.5$ mm 이고
-  $\pi r^{*2}/|C_k|\ge 0.84$ 이면 **원통**(반지름 $\max(r^*-0.1,0.5)$ mm), 또는
+  $\pi r^{*2}/|C_k|\ge 0.84$ 이면 **원통**(반지름 $\max(r^*-0.1,0.5)$ mm)으로 만들고,
+  인접한 동축 원통(중심 이동 $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$ mm)은
+  보수적 반지름 $r_{\text{merged}} = \min(r_1, r_2) - \tfrac{1}{2}\Delta c$ 의 단일
+  원통으로 추가 병합해 원래 두 원통 내부 포함을 수학적으로 보장합니다. 또는
 - 가장 큰 윤곽선에서 만든 **폴리곤 프리즘** — `approximate_polygon` 으로
   $\max(0.75, 0.55/h)$ **윤곽선 픽셀** 허용 오차로 단순화한 뒤 슬라이스 축으로
   압출합니다.
@@ -495,8 +542,9 @@ $$
 실패(탄젠트 면 붕괴, 분리된 도구, 공차 흡수)를 걸러냅니다. 정밀 Fuse 가 실패하거나
 가드를 통과하지 못할 때만 공차를 한 단계씩 올립니다.
 
-배치 경로는 더 엄격합니다. 다중 도구 `BRepAlgoAPI_Fuse` 는 **fuzzy $=0$ 에서만**
-시도하고, 다음 조건이면 채택합니다.
+배치 경로는 더 엄격합니다. 다중 도구 `BRepAlgoAPI_Fuse`(`SetRunParallel(True)` 및
+전역 `BOPAlgo_Options.SetParallelMode_s(True)`)는 **fuzzy $=0$ 에서만** 시도하고,
+다음 조건이면 채택합니다.
 
 $$
 V_{\text{fused}} \ge 0.99\max_i v_i
@@ -504,9 +552,12 @@ V_{\text{fused}} \ge 0.99\max_i v_i
 V_{\text{fused}} \le 1.01\sum_i v_i + 1,
 $$
 
-아니면 점진적 쌍별 Fuse 로 폴백하며, 각 쌍은 fuzzy $=0$ 부터 일정을 다시 시작합니다.
-배치 전체의 공차를 한꺼번에 느슨하게 하면 *모든* 탄젠트 접촉이 동시에 손상되므로,
-쌍별 승격으로 피해를 국소화합니다.
+아니면 **공간 근접 기반 균형 이진 트리 Fuse**로 폴백합니다. 각 트리 레벨에서 바운딩
+박스 중심이 가장 가까운 피연산자 쌍을 탐욕적으로 묶어 인접 바디끼리 균형 있게 병합
+($O(N^2)$ 선형 누적 체인 대신 $O(N\log N)$ 면 교차 성장)하며, 각 쌍은 fuzzy $=0$ 부터
+일정을 다시 시작합니다(한 라운드 전체에서 병합이 하나도 없을 때만 순차 복구 패스로
+전환). 배치 전체의 공차를 한꺼번에 느슨하게 하면 *모든* 탄젠트 접촉이 동시에
+손상되므로, 쌍별 승격으로 피해를 국소화합니다.
 
 **2계층 Fuse.** $v_i \ge 0.015\sum_j v_j$(유지 부피의 최소 1.5 %)인 부품(하우징,
 커버, 로터)과 해석적 코어를 먼저 Fuse 하고 **즉시** 폐합 공동 껍질을 소거합니다.
@@ -544,10 +595,13 @@ V_F=\{\text{faces}\},\qquad
 (u,v)\in E_F \iff u \text{ and } v \text{ share a B-Rep edge}.
 $$
 
-$G_F$ 의 연결 요소를 BFS 로 계산합니다. 가장 바깥 요소(바운딩 박스 대각선 최대, 동률이면
-면 수가 많은 쪽)를 `BRep_Builder` 로 껍질로 재구성하고, 솔리드로 변환한 뒤
-`ShapeFix_Solid` 로 힐링하고 `BRepLib.OrientClosedSolid` 로 바깥 방향을 맞춘 다음
-다음 조건에서 채택합니다.
+$G_F$ 의 연결 요소를 BFS 로 계산합니다. OCP 8.x 에서 `MapShapesAndAncestors` 의 형상
+리스트를 Python 으로 반복하면 엣지당 바인딩 오버헤드가 매우 크므로, 구현은 면과 엣지의
+`TopExp.MapShapes_s` 인덱스 맵과 면별 `TopExp_Explorer(..., TopAbs_EDGE)` 역탐색으로
+동일한 인접 그래프 $G_F$ 를 10배 이상 빠르게 구축합니다. 가장 바깥 요소(바운딩 박스
+대각선 최대, 동률이면 면 수가 많은 쪽)를 `BRep_Builder` 로 껍질로 재구성하고,
+솔리드로 변환한 뒤 `ShapeFix_Solid` 로 힐링하고 `BRepLib.OrientClosedSolid` 로 바깥
+방향을 맞춘 다음 다음 조건에서 채택합니다.
 
 $$
 V' \ge 0.95\,V .
@@ -563,7 +617,8 @@ Fuse 후 솔리드가 둘 이상 남으면, 가까운 아일랜드는 삭제하�
 
 1. $I$ 가 $M$ 안에 완전히 들어 있으면 건너뜁니다. 바운딩 박스가 중첩되고 **동시에**
    `BRepClass3d_SolidClassifier(M, \text{centroid}(I)) == TopAbs_IN` 인 경우입니다.
-2. 테셀레이션된 표면(편차 0.25 mm)에서 최근접 정점 쌍을 찾습니다(`cKDTree` 질의).
+2. 테셀레이션된 표면(주 바디와 아일랜드를 `mesh_shapes_in_parallel_buckets` 로 0.25 mm
+   일괄 병렬 메싱)에서 최근접 정점 쌍을 병렬 탐색합니다(`cKDTree.query(..., workers=-1)`).
 
 $$
 d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
@@ -679,7 +734,7 @@ $$
 
 `validate_shape` 는 정밀 B-Rep 지표를 리포트합니다.
 
-- `BRepCheck_Analyzer` 위상 유효성
+- `BRepCheck_Analyzer(..., parallel=True)` 멀티스레드 위상·기하 유효성
 - 솔리드/껍질 수(`TopExp_Explorer`)
 - 자유 엣지(`ShapeAnalysis_FreeBounds`, 닫힌 와이어 + 열린 와이어)
 - 부피/표면적(`BRepGProp`), 바운딩 박스, 해석 곡면 유형 히스토그램
@@ -696,7 +751,7 @@ $N_{\text{free edges}}=0$ 이 워터타이트 조건입니다.
 
 ---
 
-## 6. 프리징 없는 GUI 아키텍처
+## 6. 프리징 없는 GUI 및 멀티코어 아키텍처
 
 OCCT C++ 호출(STEP 읽기/쓰기, 불리언, `UnifySameDomain`)은 수 초 동안 Python GIL 을
 붙잡습니다. 이를 Tk 이벤트 스레드에서 실행하면 `응답 없음` 창이 생깁니다. 따라서 GUI
@@ -721,31 +776,34 @@ sequenceDiagram
     UI->>W: (cmd_id, "save_result", {output_path, schema})
 ```
 
-- **생존성(liveness).** GUI 는 40 ms 마다(`after(40, ...)`) 이벤트 큐를 폴링하며 절대
-  블로킹하지 않습니다. 따라서 C++ 실행 시간과 무관하게 최악의 UI 지연은 폴링 간격
-  하나입니다.
+- **생존성(liveness).** GUI 는 40 ms 마다(`after(40, ...)`) 모든 활성 워커의 이벤트 큐를
+  폴링하며 절대 블로킹하지 않습니다. 따라서 C++ 실행 시간과 무관하게 최악의 UI 지연은
+  폴링 간격 하나입니다.
 - **취소.** 공유 취소 이벤트를 굵은 체크포인트(부품별, 시점별, 슬래브별, Fuse 쌍별)에서
-  확인합니다. C++ 커널 호출 자체는 중단할 수 없으므로 *Force Stop* 은 워커 프로세스를
-  종료하고 재시작합니다(`spawn` 컨텍스트). 대신 메모리의 어셈블리는 사라지고 GUI 가
-  필요 시 다시 로드합니다.
+  확인합니다. C++ 커널 호출 자체는 중단할 수 없으므로 *Force Stop* 은 활성 워커
+  프로세스들을 종료하고 깨끗한 대체 워커를 재시작합니다(`spawn` 컨텍스트). 대신
+  메모리의 어셈블리는 사라지고 Single Mode 는 필요 시 다시 로드합니다.
 - **크래시 격리.** 워커 종료는 폴링 중에 감지되어 크래시로 보고되고, 워커는 자동으로
   재시작됩니다.
-- **모드 격리.** Single Mode 와 Batch Mode 는 각각 워커를 가지며(Batch Mode 는 탭을
-  처음 열 때 지연 생성), 긴 배치가 대화형 검사를 막지 않고 각 모드의 메모리 어셈블리도
+- **모드 격리.** Single Mode 는 전용 워커 1개를, Batch Mode 는 지연 생성되는 워커
+  풀(탭을 처음 열 때 첫 슬롯 생성, RUN 시작 시 `batch_workers` 수만큼 추가 확장)을
+  각각 소유하므로 긴 배치가 대화형 검사를 막지 않고 각 모드의 메모리 어셈블리도
   유효하게 유지됩니다.
 
-### 6.2 배치 모드 상태 머신
+### 6.2 배치 모드 병렬 상태 머신
 
 배치 항목은 `Pending → Running → Done | Failed | Cancelled | Skipped` 로 전이합니다.
-각 파일은 워커에서 동일한 네 단계를 실행합니다. 전체 진행률은
+최대 $W$ 개의 파일이 독립된 상주 CAD 워커 슬롯(`_WorkerSlot`)에서 동시에 실행되며, 각
+워커는 할당된 파일에 대해 동일한 네 단계를 수행합니다. 전체 진행률은 완료된 파일과
+실행 중인 모든 슬롯의 진행률을 합산합니다.
 
 $$
-p=\frac{n_{\text{done}}+\ell}{n_{\text{total}}},
-\qquad 0 \le \ell < 1
+p=\frac{n_{\text{done}}+\sum_{s\in\text{active}}\ell_s}{n_{\text{total}}},
+\qquad 0 \le \ell_s < 1
 $$
 
-입니다. 여기서 $n_{\text{done}}$ 은 완료된 파일 수이고, $\ell$ 은 현재 단계 진행 구간
-안에서의 완료 비율입니다. 구간은 다음과 같습니다.
+여기서 $n_{\text{done}}$ 은 완료된 파일 수이고, $\ell_s$ 는 슬롯 $s$ 의 현재 단계 진행
+구간 안에서의 완료 비율입니다. 구간은 다음과 같습니다.
 
 | 단계 | 명령 | 구간 |
 | :--- | :--- | :---: |
@@ -762,6 +820,40 @@ $$
 `viewer_executable` / `viewer_args`, 없으면 Windows 기본 연결 프로그램)가 실행됩니다.
 Single Mode 와 동일한 뷰어 연동을 사용하므로 두 모드가 같은 설정으로 결과를 검토할 수
 있습니다.
+
+### 6.3 멀티코어 실행과 스레드 예산 분할
+
+파이프라인은 **프로세스 내부 네이티브/`nogil` 병렬화**(단일 STEP 파일 가속)와
+**프로세스 간 파일 단위 병렬화**(GUI Batch Mode 및 CLI `--cli ... -j` 가속 —
+`STEPCAFControl_Reader`, `ShapeUpgrade_UnifySameDomain`, `ShapeFix_*`,
+`STEPControl_Writer` 처럼 OCCT 내부가 본질적으로 단일 스레드인 구간까지 파일 단위로
+병렬화)를 결합합니다.
+
+| 병렬화 계층 | 메커니즘 | 가속 대상 단계 |
+| :--- | :--- | :--- |
+| OCCT C++ 풀 (`OSD_Parallel`) | `BRepMesh_IncrementalMesh(..., True)`, `BOPAlgo_Options.SetParallelMode_s(True)`, `BRepCheck_Analyzer(..., True)` | 버킷 테셀레이션, Boolean Fuse, Defeaturing, B-Rep 검증 |
+| Python `ThreadPoolExecutor` (`nogil`) | 커밋된 BVH 위 동시 `embreex` 쿼리, `cKDTree(workers=-1)` | 가시성 Pass 1 & 2, 코어 3축 스윕 및 26방향 하늘 제거, 아일랜드 최근접 탐색 |
+| 멀티프로세스 워커 풀 (`spawn`) | $W$ 개 상주 `CadWorkerClient` 슬롯(GUI Batch) 또는 `ProcessPoolExecutor`(CLI `-j`) | 다중 STEP 파일 전체 파이프라인 |
+
+중첩 병렬화로 인한 스레드 과구독($W \times C$ 스레드의 CPU 캐시 경합)을 막고
+워커당 메모리 사용량(대형 어셈블리 기준 약 0.5–2 GB/워커)을 안전하게 유지하기 위해,
+논리 코어 수가 $C$ 인 시스템에서 워커 수 $W$ 와 워커당 스레드 예산 $T_{\text{worker}}$
+를 다음과 같이 산정합니다(`config.py::resolve_batch_workers`, `threads_per_batch_worker`).
+
+$$
+W = \min\!\left(n_{\text{files}},\ 
+\begin{cases}
+\min(w_{\text{cfg}},\ C) & w_{\text{cfg}} > 0,\\[2pt]
+\min\!\left(6,\ \max\!\left(1,\ \lfloor C/4 \rfloor\right)\right) & w_{\text{cfg}} = 0\ (\text{Auto}),
+\end{cases}\right)
+\qquad
+T_{\text{worker}} = \max\!\left(1,\ \lfloor C / W \rfloor\right).
+$$
+
+각 워커는 `configure_occt_parallelism` 으로 OCCT 의 `OSD_ThreadPool.DefaultPool_s().Init(T_worker)`
+를 설정하고, Embree `ThreadPoolExecutor` 는 $\min(T_{\text{worker}}, 12)$ 스레드로 제한합니다.
+이미 떠 있는 유휴 워커도 배치 시작 전 `"configure_threads"` IPC 명령으로 스레드 예산을
+동적 갱신합니다.
 
 ---
 
@@ -807,6 +899,7 @@ $K$ = 샘플당 광선 수, $R_{\text{grid}}$ = 코어 격자 해상도라 하�
 | `unify_same_domain` | on | 면 압축, 가드 적용 |
 | `keep_largest_only` | on | 브리지 불가 아일랜드를 컴파운드 대신 폐기 |
 | `step_schema` | AP214 | AP214 / AP242 / AP203 |
+| `batch_workers` / CLI `-j` | 0 (Auto) | Batch Mode / 다중 파일 CLI 동시 CAD 워커 수 (`0` = 자동 최대 6, 워커별 스레드 예산 분할) |
 
 안전 여백과 격자 피치는 결합되어 있습니다. 코드는
 $\text{inset} \ge 1.6h$ 를 강제하므로 격자가 거칠수록 보호 셸이 자동으로 넓어집니다.

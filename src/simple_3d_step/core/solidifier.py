@@ -17,6 +17,7 @@ Internal cavities and hidden internal features are eliminated by:
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import shutil
 import tempfile
@@ -38,7 +39,6 @@ from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeSolid,
     BRepBuilderAPI_MakeVertex,
 )
-from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepClass3d import BRepClass3d, BRepClass3d_SolidClassifier
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepLib import BRepLib
@@ -86,16 +86,23 @@ from scipy.spatial import cKDTree
 from skimage.measure import approximate_polygon, find_contours
 
 from simple_3d_step.core.occt_compat import (
-    ShapeIndexedDataMapOfList,
     ShapeIndexedMap,
     ShapeList,
+    default_ray_threads,
+    ensure_occt_parallelism_enabled,
+    make_brep_check_analyzer,
     to_edge,
     to_face,
     to_shell,
     to_solid,
     to_wire,
 )
-from simple_3d_step.core.tessellation import tessellate_shape_triangles
+from simple_3d_step.core.tessellation import (
+    TessellatedAssembly,
+    build_subset_trimesh,
+    extract_shape_triangles,
+    mesh_shapes_in_parallel_buckets,
+)
 from simple_3d_step.core.validator import validate_shape
 from simple_3d_step.models import (
     AssemblyModel,
@@ -148,7 +155,7 @@ def _heal_solid(shape: TopoDS_Shape) -> Optional[TopoDS_Solid]:
     if shape is None or shape.IsNull():
         return None
     if shape.ShapeType() == TopAbs_SOLID:
-        if BRepCheck_Analyzer(shape, False).IsValid():
+        if make_brep_check_analyzer(shape, geom_controls=False, parallel=True).IsValid():
             return to_solid(shape)
         fixer = ShapeFix_Shape(shape)
         fixer.Perform()
@@ -240,7 +247,9 @@ def _remove_small_holes_from_solid(
                 res_solids = _extract_solids(defeat.Shape())
                 if (
                     len(res_solids) == 1
-                    and BRepCheck_Analyzer(res_solids[0], False).IsValid()
+                    and make_brep_check_analyzer(
+                        res_solids[0], geom_controls=False, parallel=True
+                    ).IsValid()
                     and _shape_volume(res_solids[0]) >= _shape_volume(current) * 0.98
                 ):
                     current = res_solids[0]
@@ -257,7 +266,9 @@ def _remove_small_holes_from_solid(
             solids_w = _extract_solids(rem_wires.GetResult())
             if (
                 len(solids_w) == 1
-                and BRepCheck_Analyzer(solids_w[0], False).IsValid()
+                and make_brep_check_analyzer(
+                    solids_w[0], geom_controls=False, parallel=True
+                ).IsValid()
                 and _shape_volume(solids_w[0]) >= _shape_volume(current) * 0.98
             ):
                 current = solids_w[0]
@@ -281,19 +292,32 @@ def _strip_disconnected_void_components(solid: TopoDS_Solid) -> tuple[TopoDS_Sol
     if n_faces == 0:
         return solid, 0, 0.0
 
-    ef_map = ShapeIndexedDataMapOfList()
-    TopExp.MapShapesAndAncestors_s(solid, TopAbs_EDGE, TopAbs_FACE, ef_map)
+    # Map Face -> Edge using ShapeIndexedMap (avoids slow OCP List_TopoDS_Shape iteration)
+    emap = ShapeIndexedMap()
+    TopExp.MapShapes_s(solid, TopAbs_EDGE, emap)
+    edge_faces: list[list[int]] = [[] for _ in range(emap.Extent() + 1)]
+    for fid in range(1, n_faces + 1):
+        exp_e = TopExp_Explorer(fmap.FindKey(fid), TopAbs_EDGE)
+        while exp_e.More():
+            eid = emap.FindIndex(exp_e.Current())
+            if eid > 0:
+                edge_faces[eid].append(fid)
+            exp_e.Next()
 
     adj: list[set[int]] = [set() for _ in range(n_faces + 1)]
-    for i in range(1, ef_map.Extent() + 1):
-        flist = ef_map.FindFromIndex(i)
-        fids = [fmap.FindIndex(f) for f in flist]
+    for fids in edge_faces:
         if len(fids) < 2:
             continue
-        for a in fids:
-            for b in fids:
-                if a != b:
-                    adj[a].add(b)
+        if len(fids) == 2:
+            a, b = fids[0], fids[1]
+            if a != b:
+                adj[a].add(b)
+                adj[b].add(a)
+        else:
+            for a in fids:
+                for b in fids:
+                    if a != b:
+                        adj[a].add(b)
 
     visited = [False] * (n_faces + 1)
     components: list[list[int]] = []
@@ -473,6 +497,8 @@ def _build_analytic_interior_core(
     grid_res: int = 120,
     logs: Optional[list[str]] = None,
     cancel_check: Optional[CancelCheck] = None,
+    tessellated: Optional[TessellatedAssembly] = None,
+    max_workers: Optional[int] = None,
 ) -> list[TopoDS_Solid]:
     """Construct clean, strictly-interior analytic B-Rep cylinders & prisms.
 
@@ -480,28 +506,40 @@ def _build_analytic_interior_core(
       1. Builds an internal distance field inside the gap-bridged envelope.
       2. Enforces strict inward safety inset (>= inset_mm from outer boundary).
       3. Carves out any voxel exposed to external sky (heatsink fin valleys, external
-         recesses, counterbores) via 26-direction Embree ray visibility checks.
+         recesses, counterbores) via multi-threaded 26-direction Embree ray visibility checks.
       4. Converts remaining strictly-interior space into pure analytic B-Rep cylinders
          and simplified planar-faced extruded prisms along the optimal principal axis.
     """
-    verts_list, faces_list = [], []
-    off = 0
-    for p in kept_parts:
-        if cancel_check and cancel_check():
-            raise InterruptedError("Operation cancelled by user.")
-        defl = max(min(p.bbox_diagonal * 0.01, 0.35), 0.08)
-        v, f, _, _ = tessellate_shape_triangles(p.shape, linear_deflection=defl)
-        if len(f) > 0:
-            verts_list.append(v)
-            faces_list.append(f + off)
-            off += len(v)
+    mesh: Optional[trimesh.Trimesh] = None
+    if tessellated is not None:
+        mesh = build_subset_trimesh(tessellated, (p.part_id for p in kept_parts))
 
-    if not verts_list:
+    if mesh is None:
+        shapes = [p.shape for p in kept_parts]
+        defls = [max(min(p.bbox_diagonal * 0.01, 0.35), 0.08) for p in kept_parts]
+        mesh_shapes_in_parallel_buckets(shapes, defls, cancel_check=cancel_check)
+
+        verts_list, faces_list = [], []
+        off = 0
+        for p in kept_parts:
+            if cancel_check and cancel_check():
+                raise InterruptedError("Operation cancelled by user.")
+            v, f, _, _ = extract_shape_triangles(p.shape)
+            if len(f) > 0:
+                verts_list.append(v)
+                faces_list.append(f + off)
+                off += len(v)
+
+        if not verts_list:
+            return []
+
+        mesh = trimesh.Trimesh(
+            vertices=np.vstack(verts_list), faces=np.vstack(faces_list), process=False
+        )
+
+    if len(mesh.faces) == 0:
         return []
 
-    mesh = trimesh.Trimesh(
-        vertices=np.vstack(verts_list), faces=np.vstack(faces_list), process=False
-    )
     bmin = np.asarray(mesh.bounds[0], dtype=np.float64)
     bmax = np.asarray(mesh.bounds[1], dtype=np.float64)
     extents = bmax - bmin
@@ -517,9 +555,19 @@ def _build_analytic_interior_core(
     dims = np.ceil(extents / pitch).astype(int) + 2 * pad + 1
     nx, ny, nz = int(dims[0]), int(dims[1]), int(dims[2])
 
-    # 3-axis Embree surface occupancy sweep
-    occ = np.zeros((nx, ny, nz), dtype=bool)
+    # Pre-warm Embree BVH and trimesh cached properties on main thread for thread-safe queries
     intersector = mesh.ray
+    _ = mesh.triangles
+    _ = mesh.face_normals
+    _ = intersector.intersects_first(
+        np.array([0.5 * (bmin + bmax)], dtype=np.float32),
+        np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+    )
+
+    n_workers = default_ray_threads(max_workers)
+
+    # Multi-threaded 3-axis Embree surface occupancy sweep
+    occ = np.zeros((nx, ny, nz), dtype=bool)
     xs = origin[0] + (np.arange(nx) + 0.5) * pitch
     ys = origin[1] + (np.arange(ny) + 0.5) * pitch
     zs = origin[2] + (np.arange(nz) + 0.5) * pitch
@@ -529,9 +577,9 @@ def _build_analytic_interior_core(
         (1, xs, zs, origin[1] - pitch, np.array([0.0, 1.0, 0.0])),
         (2, xs, ys, origin[2] - pitch, np.array([0.0, 0.0, 1.0])),
     ]
+    sweep_jobs: list[tuple[np.ndarray, np.ndarray]] = []
+    ray_tile = 4096
     for axis, a1, a2, start_val, direction in sweeps:
-        if cancel_check and cancel_check():
-            raise InterruptedError("Operation cancelled by user.")
         g1, g2 = np.meshgrid(a1, a2, indexing="ij")
         n_rays = g1.size
         origs = np.empty((n_rays, 3), dtype=np.float64)
@@ -541,8 +589,17 @@ def _build_analytic_interior_core(
             origs[:, 0], origs[:, 1], origs[:, 2] = g1.ravel(), start_val, g2.ravel()
         else:
             origs[:, 0], origs[:, 1], origs[:, 2] = g1.ravel(), g2.ravel(), start_val
-        dirs = np.broadcast_to(direction, (n_rays, 3))
-        locs, _, _ = intersector.intersects_location(origs, dirs, multiple_hits=True)
+        for r0 in range(0, n_rays, ray_tile):
+            r1 = min(r0 + ray_tile, n_rays)
+            sweep_jobs.append((origs[r0:r1], np.broadcast_to(direction, (r1 - r0, 3))))
+
+    def _run_sweep_tile(orig_chunk: np.ndarray, dir_chunk: np.ndarray) -> np.ndarray:
+        if cancel_check and cancel_check():
+            raise InterruptedError("Operation cancelled by user.")
+        locs, _, _ = intersector.intersects_location(orig_chunk, dir_chunk, multiple_hits=True)
+        return locs
+
+    def _mark_occ(locs: np.ndarray) -> None:
         if len(locs) > 0:
             ijk = np.floor((locs - origin) / pitch).astype(int)
             ok = (
@@ -553,63 +610,95 @@ def _build_analytic_interior_core(
             ijk = ijk[ok]
             occ[ijk[:, 0], ijk[:, 1], ijk[:, 2]] = True
 
-    # Unclosed flood-fill: regions already 100% sealed by existing walls
-    air_raw, _ = ndimage.label(~occ)
-    unclosed_inside = air_raw != int(air_raw[0, 0, 0])
+    executor: Optional[ThreadPoolExecutor] = (
+        ThreadPoolExecutor(max_workers=n_workers) if n_workers > 1 else None
+    )
+    try:
+        if executor is not None and len(sweep_jobs) > 1:
+            futs = [executor.submit(_run_sweep_tile, oc, dc) for oc, dc in sweep_jobs]
+            for fut in as_completed(futs):
+                if cancel_check and cancel_check():
+                    for pending in futs:
+                        pending.cancel()
+                    raise InterruptedError("Operation cancelled by user.")
+                _mark_occ(fut.result())
+        else:
+            for oc, dc in sweep_jobs:
+                _mark_occ(_run_sweep_tile(oc, dc))
 
-    # EDT gap-bridged envelope (bridges bearing/cover running clearances up to ~2*bridge_gap_mm)
-    if r_close >= 0.75:
-        dilated = ndimage.distance_transform_edt(~occ) <= r_close
-        air_dil, _ = ndimage.label(~dilated)
-        filled_dil = air_dil != int(air_dil[0, 0, 0])
-        envelope = (ndimage.distance_transform_edt(filled_dil) > r_close) | occ
-        air2, _ = ndimage.label(~envelope)
-        envelope = air2 != int(air2[0, 0, 0])
-    else:
-        envelope = unclosed_inside
+        # Unclosed flood-fill: regions already 100% sealed by existing walls
+        air_raw, _ = ndimage.label(~occ)
+        unclosed_inside = air_raw != int(air_raw[0, 0, 0])
 
-    # Strict inward safety inset: core stays >= inset_mm inside the outer envelope
-    effective_inset = max(float(inset_mm), pitch * 1.6)
-    dist_to_outside = ndimage.distance_transform_edt(envelope) * pitch
-    safe_core = dist_to_outside >= effective_inset
+        # EDT gap-bridged envelope (bridges bearing/cover running clearances up to ~2*bridge_gap_mm)
+        if r_close >= 0.75:
+            dilated = ndimage.distance_transform_edt(~occ) <= r_close
+            air_dil, _ = ndimage.label(~dilated)
+            filled_dil = air_dil != int(air_dil[0, 0, 0])
+            envelope = (ndimage.distance_transform_edt(filled_dil) > r_close) | occ
+            air2, _ = ndimage.label(~envelope)
+            envelope = air2 != int(air2[0, 0, 0])
+        else:
+            envelope = unclosed_inside
 
-    if not safe_core.any():
-        return []
+        # Strict inward safety inset: core stays >= inset_mm inside the outer envelope
+        effective_inset = max(float(inset_mm), pitch * 1.6)
+        dist_to_outside = ndimage.distance_transform_edt(envelope) * pitch
+        safe_core = dist_to_outside >= effective_inset
 
-    # --- Embree 26-direction Visibility Carving ---
-    # Any candidate core voxel that wasn't strictly sealed in `unclosed_inside` AND has wide
-    # open line-of-sight to the sky (e.g. between heatsink cooling fins or in an open external
-    # recessed pocket) is carved away so the core NEVER intrudes into exterior features!
-    uncertain_mask = safe_core & (~unclosed_inside)
-    uncertain_ijk = np.argwhere(uncertain_mask)
-    carved_voxels = 0
-    if len(uncertain_ijk) > 0:
-        dirs26 = _26_unit_directions()
-        n_dirs = len(dirs26)
-        pts_u = origin + (uncertain_ijk + 0.5) * pitch
-        # Process in chunks to keep memory modest
-        chunk_size = 4000
-        exposed_flags = np.zeros(len(pts_u), dtype=bool)
-        for c0 in range(0, len(pts_u), chunk_size):
-            if cancel_check and cancel_check():
-                raise InterruptedError("Operation cancelled by user.")
-            c1 = min(c0 + chunk_size, len(pts_u))
-            sub_pts = pts_u[c0:c1]
-            ray_origs = np.repeat(sub_pts, n_dirs, axis=0)
-            ray_dirs = np.tile(dirs26, (len(sub_pts), 1))
-            hits = intersector.intersects_any(ray_origins=ray_origs, ray_directions=ray_dirs)
-            sky_vis = np.mean(~hits.reshape(len(sub_pts), n_dirs), axis=1)
-            # >= 15% unobstructed sky directions => external recess / fin valley, NOT internal cavity
-            exposed_flags[c0:c1] = sky_vis >= 0.15
+        if not safe_core.any():
+            return []
 
-        if np.any(exposed_flags):
-            bad_ijk = uncertain_ijk[exposed_flags]
-            exposed_grid = np.zeros_like(safe_core)
-            exposed_grid[bad_ijk[:, 0], bad_ijk[:, 1], bad_ijk[:, 2]] = True
-            # Dilate carved air slightly (1 voxel) as safety margin from visible recesses
-            exposed_grid = ndimage.binary_dilation(exposed_grid, iterations=1)
-            carved_voxels = int(np.count_nonzero(safe_core & exposed_grid))
-            safe_core &= ~exposed_grid
+        # --- Multi-threaded Embree 26-direction Visibility Carving ---
+        # Any candidate core voxel that wasn't strictly sealed in `unclosed_inside` AND has wide
+        # open line-of-sight to the sky (e.g. between heatsink cooling fins or in an open external
+        # recessed pocket) is carved away so the core NEVER intrudes into exterior features!
+        uncertain_mask = safe_core & (~unclosed_inside)
+        uncertain_ijk = np.argwhere(uncertain_mask)
+        carved_voxels = 0
+        if len(uncertain_ijk) > 0:
+            dirs26 = _26_unit_directions()
+            n_dirs = len(dirs26)
+            pts_u = origin + (uncertain_ijk + 0.5) * pitch
+            chunk_size = 4000
+            exposed_flags = np.zeros(len(pts_u), dtype=bool)
+            chunks = [(c0, min(c0 + chunk_size, len(pts_u))) for c0 in range(0, len(pts_u), chunk_size)]
+
+            def _carve_chunk(c0: int, c1: int) -> tuple[int, int, np.ndarray]:
+                if cancel_check and cancel_check():
+                    raise InterruptedError("Operation cancelled by user.")
+                sub_pts = pts_u[c0:c1]
+                ray_origs = np.repeat(sub_pts, n_dirs, axis=0)
+                ray_dirs = np.tile(dirs26, (len(sub_pts), 1))
+                hits = intersector.intersects_any(ray_origins=ray_origs, ray_directions=ray_dirs)
+                sky_vis = np.mean(~hits.reshape(len(sub_pts), n_dirs), axis=1)
+                return c0, c1, (sky_vis >= 0.15)
+
+            if executor is not None and len(chunks) > 1:
+                carve_futs = [executor.submit(_carve_chunk, c0, c1) for c0, c1 in chunks]
+                for fut in as_completed(carve_futs):
+                    if cancel_check and cancel_check():
+                        for pending in carve_futs:
+                            pending.cancel()
+                        raise InterruptedError("Operation cancelled by user.")
+                    c0, c1, flags = fut.result()
+                    exposed_flags[c0:c1] = flags
+            else:
+                for c0, c1 in chunks:
+                    _, _, flags = _carve_chunk(c0, c1)
+                    exposed_flags[c0:c1] = flags
+
+            if np.any(exposed_flags):
+                bad_ijk = uncertain_ijk[exposed_flags]
+                exposed_grid = np.zeros_like(safe_core)
+                exposed_grid[bad_ijk[:, 0], bad_ijk[:, 1], bad_ijk[:, 2]] = True
+                # Dilate carved air slightly (1 voxel) as safety margin from visible recesses
+                exposed_grid = ndimage.binary_dilation(exposed_grid, iterations=1)
+                carved_voxels = int(np.count_nonzero(safe_core & exposed_grid))
+                safe_core &= ~exposed_grid
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     if not safe_core.any():
         return []
@@ -642,9 +731,9 @@ def _build_analytic_interior_core(
     w_min_i, w_max_i = int(w_indices[0]), int(w_indices[-1])
     w_overlap = max(0.25, pitch * 0.45)
 
-    core_solids: list[TopoDS_Solid] = []
-    n_cyls = 0
-    n_prisms = 0
+    # Collect cylinder specs first so adjacent coaxial slabs coalesce into single exact cylinders
+    cyl_specs: list[list[float]] = []  # [cu, cv, radius, w0, w1]
+    prism_solids: list[TopoDS_Solid] = []
     wi = w_min_i
 
     while wi <= w_max_i:
@@ -656,6 +745,25 @@ def _build_analytic_interior_core(
         if not slice_2d.any():
             slice_2d = grid_p[:, :, wi]
             w_end = wi
+        else:
+            # Greedily extend slab while cross-section stays constant (IoU >= 0.94),
+            # collapsing long uniform bores/boxes into single exact analytic primitives
+            # instead of dozens of redundant 3mm stacked slabs.
+            base_union = np.any(grid_p[:, :, wi : w_end + 1], axis=2)
+            while w_end < w_max_i:
+                nxt_sl = grid_p[:, :, w_end + 1]
+                cand_inter = slice_2d & nxt_sl
+                cand_union = base_union | nxt_sl
+                u_cnt = int(np.count_nonzero(cand_union))
+                if u_cnt == 0:
+                    break
+                i_cnt = int(np.count_nonzero(cand_inter))
+                if i_cnt >= 0.94 * u_cnt:
+                    slice_2d = cand_inter
+                    base_union = cand_union
+                    w_end += 1
+                else:
+                    break
 
         slice_2d = ndimage.binary_fill_holes(slice_2d)
         lbl_2d, n2 = ndimage.label(slice_2d)
@@ -685,12 +793,24 @@ def _build_analytic_interior_core(
             if r_inscribed >= 2.5 and (circ_area / area_mm2) >= 0.84:
                 cu = origin_p[0] + (max_idx[0] + 0.5) * pitch
                 cv = origin_p[1] + (max_idx[1] + 0.5) * pitch
-                p0 = _to_world_pnt(cu, cv, w0)
-                cyl = BRepPrimAPI_MakeCylinder(
-                    gp_Ax2(p0, slice_dir), max(r_inscribed - 0.1, 0.5), height
-                ).Solid()
-                core_solids.append(cyl)
-                n_cyls += 1
+                rad = max(r_inscribed - 0.1, 0.5)
+                # Try coalescing with an existing coaxial adjacent cylinder (strictly conservative radius)
+                merged = False
+                for prev in reversed(cyl_specs):
+                    if prev[4] < w0 - 0.05:
+                        continue
+                    shift = math.hypot(cu - prev[0], cv - prev[1])
+                    if shift <= 0.25 and abs(rad - prev[2]) <= 0.35:
+                        new_r = min(prev[2], rad) - 0.5 * shift
+                        if new_r >= max(0.5, 0.92 * min(prev[2], rad)):
+                            prev[0] = 0.5 * (prev[0] + cu)
+                            prev[1] = 0.5 * (prev[1] + cv)
+                            prev[2] = new_r
+                            prev[4] = max(prev[4], w1)
+                            merged = True
+                            break
+                if not merged:
+                    cyl_specs.append([cu, cv, rad, w0, w1])
             else:
                 eroded_2d = ndimage.binary_erosion(comp, iterations=1)
                 if not eroded_2d.any():
@@ -719,11 +839,21 @@ def _build_analytic_interior_core(
                         prism = BRepPrimAPI_MakePrism(mk_f.Face(), extrude_vec).Shape()
                         sols_p = _extract_solids(prism)
                         if sols_p:
-                            core_solids.append(sols_p[0])
-                            n_prisms += 1
+                            prism_solids.append(sols_p[0])
 
         wi = w_end + 1
 
+    core_solids: list[TopoDS_Solid] = []
+    for cu, cv, rad, cw0, cw1 in cyl_specs:
+        ch = cw1 - cw0
+        if ch > 1e-3:
+            p0 = _to_world_pnt(cu, cv, cw0)
+            cyl = BRepPrimAPI_MakeCylinder(gp_Ax2(p0, slice_dir), rad, ch).Solid()
+            core_solids.append(cyl)
+    core_solids.extend(prism_solids)
+
+    n_cyls = len(cyl_specs)
+    n_prisms = len(prism_solids)
     if logs is not None:
         logs.append(
             f"Analytic interior core generated ({axis_names[slice_axis]}-axis aligned: "
@@ -814,27 +944,92 @@ def _batch_fuse_safe(
     except Exception:
         pass
 
-    # Progressive pairwise fallback (strictly volume-checked so no part is silently lost)
-    acc = shapes[0]
+    # Spatial-proximity balanced binary-tree fallback (O(N log N) face work vs O(N^2) linear chain)
+    def _pair_by_proximity(layer: list[TopoDS_Shape]) -> list[tuple[TopoDS_Shape, Optional[TopoDS_Shape]]]:
+        n = len(layer)
+        if n <= 2:
+            return [(layer[0], layer[1] if n == 2 else None)]
+        centers = []
+        for s in layer:
+            bmin_s, bmax_s = _shape_bbox(s)
+            centers.append(0.5 * (bmin_s + bmax_s))
+        pts = np.vstack(centers)
+        used = [False] * n
+        pairs: list[tuple[TopoDS_Shape, Optional[TopoDS_Shape]]] = []
+        for i in range(n):
+            if used[i]:
+                continue
+            used[i] = True
+            best_j = -1
+            best_d2 = float("inf")
+            for j in range(i + 1, n):
+                if used[j]:
+                    continue
+                diff = pts[j] - pts[i]
+                d2 = float(diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2])
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_j = j
+            if best_j >= 0:
+                used[best_j] = True
+                pairs.append((layer[i], layer[best_j]))
+            else:
+                pairs.append((layer[i], None))
+        return pairs
+
+    layer = list(shapes)
+    total_merges = len(shapes) - 1
+    merges_done = 0
     failed = 0
-    total = len(shapes) - 1
     p0, p1 = prog_range
 
-    for idx, nxt in enumerate(shapes[1:], start=1):
+    while len(layer) > 1:
         if cancel_check and cancel_check():
             raise InterruptedError("Operation cancelled by user.")
-        if progress_cb and (idx % max(1, total // 10) == 0 or idx == total):
-            progress_cb(p0 + (p1 - p0) * (idx / max(total, 1)), f"{label} ({idx}/{total})...")
-        merged = _fuse_two_safe(acc, nxt)
-        if merged is not None:
-            acc = merged
-        else:
-            failed += 1
+        pairs = _pair_by_proximity(layer)
+        next_layer: list[TopoDS_Shape] = []
+        round_merged = 0
+        for s_a, s_b in pairs:
+            if cancel_check and cancel_check():
+                raise InterruptedError("Operation cancelled by user.")
+            if s_b is None:
+                next_layer.append(s_a)
+                continue
+            merged = _fuse_two_safe(s_a, s_b)
+            if merged is not None:
+                next_layer.append(merged)
+                round_merged += 1
+                merges_done += 1
+                if progress_cb:
+                    progress_cb(
+                        p0 + (p1 - p0) * min(1.0, merges_done / max(total_merges, 1)),
+                        f"{label} tree fuse ({merges_done}/{total_merges})...",
+                    )
+            else:
+                next_layer.append(s_a)
+                next_layer.append(s_b)
 
+        if round_merged == 0:
+            # Final sequential rescue pass for any stubborn pairs that couldn't pair by proximity
+            acc = next_layer[0]
+            for nxt in next_layer[1:]:
+                if cancel_check and cancel_check():
+                    raise InterruptedError("Operation cancelled by user.")
+                merged = _fuse_two_safe(acc, nxt)
+                if merged is not None:
+                    acc = merged
+                    merges_done += 1
+                else:
+                    failed += 1
+            layer = [acc]
+            break
+        layer = next_layer
+
+    acc = layer[0]
     if failed > 0:
-        logs.append(f"{label} sequential fuse completed ({total + 1 - failed}/{total + 1} succeeded, {failed} skipped)")
+        logs.append(f"{label} tree fuse completed ({total_merges + 1 - failed}/{total_merges + 1} succeeded, {failed} skipped)")
     else:
-        logs.append(f"{label} sequential fuse completed ({total + 1}/{total + 1} succeeded)")
+        logs.append(f"{label} tree fuse completed ({total_merges + 1}/{total_merges + 1} succeeded)")
     return acc
 
 
@@ -862,8 +1057,14 @@ def _connect_floating_islands(
     if not islands or max_gap_mm <= 0.0:
         return main_solid, islands
 
+    # Batch-mesh main_solid + all islands together across all CPU cores
+    all_bridge_shapes: list[TopoDS_Shape] = [main_solid] + list(islands)
+    mesh_shapes_in_parallel_buckets(
+        all_bridge_shapes, [0.25] * len(all_bridge_shapes), cancel_check=cancel_check
+    )
+
     # Build fast KDTree on main_solid surface vertices
-    mv, _, _, _ = tessellate_shape_triangles(main_solid, 0.25)
+    mv, _, _, _ = extract_shape_triangles(main_solid)
     if len(mv) == 0:
         return main_solid, islands
     main_tree = cKDTree(mv)
@@ -877,10 +1078,10 @@ def _connect_floating_islands(
         if _is_solid_inside(isl, main_solid):
             continue
 
-        iv, _, _, _ = tessellate_shape_triangles(isl, 0.25)
+        iv, _, _, _ = extract_shape_triangles(isl)
         if len(iv) == 0:
             continue
-        dists, idxs = main_tree.query(iv, k=1)
+        dists, idxs = main_tree.query(iv, k=1, workers=-1)
         best_i = int(np.argmin(dists))
         min_dist = float(dists[best_i])
         if min_dist > max_gap_mm:
@@ -1114,37 +1315,39 @@ def _heal_mesh_blocking_faces(
         sfsf.SetPrecision(0.015)
         sfsf.SetMaxTolerance(0.015)
         sfsf.Perform()
+        fixed_small = sfsf.Shape()
 
-        sf = ShapeFix_Shape(sfsf.Shape())
-        sf.SetPrecision(1e-4)
-        sf.SetMaxTolerance(1e-3)
-        sf.Perform()
+        if not fixed_small.IsSame(current):
+            sf = ShapeFix_Shape(fixed_small)
+            sf.SetPrecision(1e-4)
+            sf.SetMaxTolerance(1e-3)
+            sf.Perform()
 
-        sols = _extract_solids(sf.Shape())
-        cand_a: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
-        for s in sols:
-            BRepLib.OrientClosedSolid_s(s)
-        BRepTools.Clean_s(cand_a)
-        # Re-normalize via 3D-curve STEP so transient in-memory pcurve tolerances from
-        # FixSmallFace match the clean round-trip validity seen by external viewers.
-        cand_a = _normalize_via_step_3d_curves(cand_a)
+            sols = _extract_solids(sf.Shape())
+            cand_a: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
+            for s in sols:
+                BRepLib.OrientClosedSolid_s(s)
+            BRepTools.Clean_s(cand_a)
+            # Re-normalize via 3D-curve STEP so transient in-memory pcurve tolerances from
+            # FixSmallFace match the clean round-trip validity seen by external viewers.
+            cand_a = _normalize_via_step_3d_curves(cand_a)
 
-        rep_a = validate_shape(cand_a)
-        lacking_a = _count_lacking_wires(cand_a)
-        if (
-            rep_a.solid_count == rep_base.solid_count
-            and rep_a.shell_count <= rep_base.shell_count
-            and rep_a.is_watertight
-            and not (rep_base.is_valid and not rep_a.is_valid)
-            and abs(rep_a.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
-            and lacking_a <= lacking_base
-        ):
-            removed_slivers = max(0, rep_base.face_count - rep_a.face_count)
-            if removed_slivers > 0:
-                logs.append(f"Cleaned {removed_slivers} microscopic sliver face(s) ({rep_a.face_count:,} faces remaining)")
-            current = cand_a
-            rep_base = rep_a
-            lacking_base = lacking_a
+            rep_a = validate_shape(cand_a)
+            lacking_a = _count_lacking_wires(cand_a)
+            if (
+                rep_a.solid_count == rep_base.solid_count
+                and rep_a.shell_count <= rep_base.shell_count
+                and rep_a.is_watertight
+                and not (rep_base.is_valid and not rep_a.is_valid)
+                and abs(rep_a.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+                and lacking_a <= lacking_base
+            ):
+                removed_slivers = max(0, rep_base.face_count - rep_a.face_count)
+                if removed_slivers > 0:
+                    logs.append(f"Cleaned {removed_slivers} microscopic sliver face(s) ({rep_a.face_count:,} faces remaining)")
+                current = cand_a
+                rep_base = rep_a
+                lacking_base = lacking_a
     except Exception:
         pass
 
@@ -1339,8 +1542,11 @@ def simplify_assembly_to_single_solid(
     config: SimplifyConfig,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_check: Optional[CancelCheck] = None,
+    tessellated: Optional[TessellatedAssembly] = None,
+    max_workers: Optional[int] = None,
 ) -> SimplifyResult:
     """Remove internal parts and build a 100% exterior-preserving single exact B-Rep Solid."""
+    ensure_occt_parallelism_enabled()
     t0 = time.perf_counter()
     logs: list[str] = []
 
@@ -1403,6 +1609,8 @@ def simplify_assembly_to_single_solid(
             grid_res=config.core_grid_resolution,
             logs=logs,
             cancel_check=cancel_check,
+            tessellated=tessellated,
+            max_workers=max_workers,
         )
         if core_primitives:
             if progress_cb:

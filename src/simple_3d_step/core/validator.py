@@ -5,7 +5,6 @@ from __future__ import annotations
 from OCP.Bnd import Bnd_Box
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
-from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.GeomAbs import (
     GeomAbs_BSplineSurface,
@@ -21,7 +20,7 @@ from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS_Shape
 
-from simple_3d_step.core.occt_compat import to_face
+from simple_3d_step.core.occt_compat import make_brep_check_analyzer, to_face
 from simple_3d_step.models import ValidationReport
 
 
@@ -110,7 +109,7 @@ def validate_shape(shape: TopoDS_Shape) -> ValidationReport:
             float(pmax.Z() - pmin.Z()),
         )
 
-    analyzer = BRepCheck_Analyzer(shape, True)
+    analyzer = make_brep_check_analyzer(shape, geom_controls=True, parallel=True)
     brep_valid = bool(analyzer.IsValid())
 
     if solid_count == 0:

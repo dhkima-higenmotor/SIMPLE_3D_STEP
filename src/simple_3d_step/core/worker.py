@@ -81,9 +81,11 @@ def cad_worker_main(
     cmd_queue: multiprocessing.Queue,
     evt_queue: multiprocessing.Queue,
     cancel_event: Any,
+    max_threads: Optional[int] = None,
 ) -> None:
     """Persistent CAD worker process loop holding OCCT shapes in local RAM."""
     # Import heavy CAD modules only inside the worker process
+    from simple_3d_step.core.occt_compat import configure_occt_parallelism
     from simple_3d_step.core.solidifier import simplify_assembly_to_single_solid
     from simple_3d_step.core.step_io import (
         load_step_assembly,
@@ -91,6 +93,9 @@ def cad_worker_main(
         save_shape_to_step,
     )
     from simple_3d_step.core.visibility import analyze_visibility
+
+    worker_threads: Optional[int] = max_threads
+    configure_occt_parallelism(max_threads=worker_threads)
 
     assembly: Optional[AssemblyModel] = None
     tessellated = None
@@ -120,7 +125,13 @@ def cad_worker_main(
             return bool(cancel_event.is_set())
 
         try:
-            if cmd_name == "load_step":
+            if cmd_name == "configure_threads":
+                req = payload.get("max_threads")
+                worker_threads = int(req) if req is not None else None
+                applied = configure_occt_parallelism(max_threads=worker_threads)
+                evt_queue.put(("done", (cmd_id, "configure_threads", {"threads": applied})))
+
+            elif cmd_name == "load_step":
                 path = Path(payload["path"])
                 assembly = load_step_assembly(
                     path, progress_cb=_progress, cancel_check=_is_cancelled
@@ -156,6 +167,7 @@ def cad_worker_main(
                     tessellated=tessellated,
                     progress_cb=_progress,
                     cancel_check=_is_cancelled,
+                    max_workers=worker_threads,
                 )
                 tessellated = vis_res.tessellated
                 evt_queue.put(
@@ -184,6 +196,8 @@ def cad_worker_main(
                     simp_cfg,
                     progress_cb=_progress,
                     cancel_check=_is_cancelled,
+                    tessellated=tessellated,
+                    max_workers=worker_threads,
                 )
                 evt_queue.put(
                     (
@@ -278,8 +292,9 @@ class WorkerEvent:
 class CadWorkerClient:
     """Manages lifecycle, IPC queues, and cancellation of the CAD subprocess."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_threads: Optional[int] = None) -> None:
         self._ctx = multiprocessing.get_context("spawn")
+        self._max_threads: Optional[int] = max_threads
         self._cmd_queue: Optional[multiprocessing.Queue] = None
         self._evt_queue: Optional[multiprocessing.Queue] = None
         self._cancel_event: Any = None
@@ -298,6 +313,12 @@ class CadWorkerClient:
     def is_ready(self) -> bool:
         return self._ready and self.is_alive
 
+    def set_max_threads(self, max_threads: Optional[int]) -> None:
+        """Update per-worker thread budget (applied immediately if worker is alive)."""
+        self._max_threads = max_threads
+        if self.is_alive and self._cmd_queue is not None:
+            self._cmd_queue.put((0, "configure_threads", {"max_threads": max_threads}))
+
     def start(self) -> None:
         """Spawn a fresh persistent CAD worker process."""
         if self.is_alive:
@@ -308,7 +329,7 @@ class CadWorkerClient:
         self._ready = False
         self._proc = self._ctx.Process(
             target=cad_worker_main,
-            args=(self._cmd_queue, self._evt_queue, self._cancel_event),
+            args=(self._cmd_queue, self._evt_queue, self._cancel_event, self._max_threads),
             name="Simple3DStepCadWorker",
             daemon=True,
         )

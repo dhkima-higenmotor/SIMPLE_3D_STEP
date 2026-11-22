@@ -12,7 +12,7 @@
 
 ## GUI 화면
 
-하나의 창에서 **Single Mode**(대화형 4단계 워크플로우)와 **Batch Mode**(다중 STEP 파일 순차 처리) 탭을 언제든 전환할 수 있습니다.
+하나의 창에서 **Single Mode**(대화형 4단계 워크플로우)와 **Batch Mode**(멀티 CPU 코어 기반 다중 STEP 파일 병렬 처리) 탭을 언제든 전환할 수 있습니다.
 
 ### Single Mode — 대화형 4단계 워크플로우
 
@@ -20,11 +20,11 @@
 
 부품 테이블에서 외관 부품은 녹색(Keep), 숨은 내부 부품은 적색(Drop)으로 표시되고, 각 단계가 끝나면 워크플로우 버튼이 녹색 `✔`로 바뀝니다. 우측 결과 배지에는 최종 단일 솔리드 검증 결과(`Solid 1 / Shell 1 · Fill +402,124 mm³`)가 표시됩니다. 우측 고급 파라미터 패널은 기본 숨김이며 **[Parameters]** 버튼으로 토글합니다.
 
-### Batch Mode — 다중 파일 순차 처리
+### Batch Mode — 다중 파일 병렬 처리
 
-![Batch Mode 화면: STEP 2개를 순차 처리하고 각 원본과 같은 폴더에 결과 저장](docs/screenshots/gui_batch_mode.png)
+![Batch Mode 화면: Batch Mode에서 STEP 파일을 처리하고 각 원본과 같은 폴더에 결과 저장](docs/screenshots/gui_batch_mode.png)
 
-대기 중인 각 파일의 상태(`Pending` / `Running` / `Done` / `Failed` / `Skipped`), 원본 폴더, 출력 파일명이 표시됩니다. **[RUN]**을 누르면 선택된 행(선택이 없으면 전체 큐)을 `config.json` 파라미터로 순차 처리하고, 상태바에 `Batch finished — N succeeded, M failed` 요약이 표시됩니다. **출력이 생성된 행을 더블클릭**하면 해당 `<파일명>_simplified.step` 파일이 설정된 외부 3D 뷰어로 열립니다.
+대기 중인 각 파일의 상태(`Pending` / `Running` / `Done` / `Failed` / `Skipped`), 원본 폴더, 출력 파일명이 표시됩니다. **[RUN]**을 누르면 선택된 행(선택이 없으면 전체 큐)을 `config.json` 파라미터와 상주형 멀티 워커 CAD 풀(`batch_workers`, `0` = Auto) 및 워커별 스레드 예산 분할로 병렬 처리하고, 상태바에 `Batch finished — N succeeded, M failed` 요약이 표시됩니다. **출력이 생성된 행을 더블클릭**하면 해당 `<파일명>_simplified.step` 파일이 설정된 외부 3D 뷰어로 열립니다.
 
 ### 애플리케이션 아이콘
 
@@ -44,21 +44,22 @@
 - 어셈블리 계층 구조, 부품 이름, 인스턴스 위치 변환(`TopLoc_Location`), 부피, 표면적, 면 수, 외형 크기(BBox)를 보존하여 로드합니다.
 - 한글/유니코드가 포함된 Windows 파일 경로도 안전하게 읽고 저장합니다.
 
-### 2. 2-Pass 외부 가시성 분석 (Intel Embree BVH)
-- **Pass 1 (외부→내부 다방향 Ray Casting)**: Fibonacci 구면 시점(기본 64시점)에서 직교 광선 격자를 투사하고, Cauchy 적분 기하 면적 추정으로 삼각형 크기에 무관한 노출 비율을 계산합니다.
-- **Pass 2 (내부→외부 반구 역방향 검증)**: 경계 및 소형 부품 표면에서 외부로 반구 광선을 발사해 소형 외부 볼트·커넥터·돌기가 오삭제되지 않도록 검증합니다.
+### 2. 멀티코어 2-Pass 외부 가시성 분석 (Intel Embree BVH)
+- **병렬 버킷 테셀레이션**: 부품을 로그 Deflection 버킷별 `TopoDS_Compound`로 묶어 OCCT 네이티브 C++ 병렬 메셔(`BRepMesh_IncrementalMesh` / `OSD_Parallel`)를 일괄 실행해 모든 CPU 코어를 활용하며, 생성된 메시는 이후 내부 코어 생성 단계에서도 재사용합니다.
+- **Pass 1 (외부→내부 다방향 Ray Casting)**: Fibonacci 구면 시점(기본 64시점)의 직교 광선 격자를 `ThreadPoolExecutor`(`nogil` Embree 쿼리)로 병렬 투사하고, Cauchy 적분 기하 면적 추정으로 삼각형 크기에 무관한 노출 비율을 계산합니다.
+- **Pass 2 (내부→외부 반구 역방향 검증)**: 경계 및 소형 부품 표면에서 외부로 반구 광선을 병렬 발사(결정적 샘플링 유지)해 소형 외부 볼트·커넥터·돌기가 오삭제되지 않도록 검증합니다.
 - **수동 조정 지원**: GUI 부품 테이블에서 검색·필터·정렬 및 더블클릭/`Space` 키로 언제든지 `Keep`(유지) ↔ `Drop`(삭제) 상태를 수동 변경할 수 있습니다.
 
 ### 3. 100% 외관 원본 보존 정밀 B-Rep 솔리드화 (삼각 복셀 왜곡 없음)
-- **외벽 안쪽 해석적 B-Rep 내부 코어**: 외피에서 안전 여백(`core_inset_mm`) 안쪽이면서 26방향 Embree 가시성 보호(방열핀 골짜기·외부 홈 유출 방지) 영역에만 해석적 원통(`MakeCylinder`) 및 다각 프리즘(`MakePrism`) 코어를 생성하여 로터·커버·하우징 사이의 내부 간극을 브리지합니다.
-- **정밀 우선 Boolean Fuse**: `fuzzy=0.0` 정밀 결합을 우선 시도하고 부피 보존 검증을 수행하여 SolidWorks·CATIA·NX 등에서 생성된 미세 필렛과 탄젠트 엣지 손상을 방지합니다.
-- **밀폐 내부 공동(Closed Void Shell) 완전 제거**: 최종 후처리 단계에서 다중 쉘 내부 공동(`BRepClass3d.OuterShell_s` + `BRepBuilderAPI_MakeSolid`)뿐만 아니라 단일 쉘 내부에 숨어 있는 비연결 내부 공동 컴포넌트(B-Rep 엣지-면 인접 그래프 BFS)까지 모두 소거하여, 단면 절단 시 속이 완전히 꽉 찬 솔리드를 보장합니다.
-- **이종 CAD 커널 및 OpenCASCADE CAD Assistant 호환성**: 3D 커브 기반 STEP 정규화, 정밀도 허용 오차 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, `ShapeFix_FixSmallFace` 미세 슬리버 정리, 무왜곡 곡선 엣지 분할을 적용하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 단면 캡핑까지 정상 Solid로 표시됩니다.
-- **공차 분리 외관 부품 연결 및 동일 곡면 통합**: 미세 공차로 떠 있는 외관 부품(커넥터·볼트 등)을 숨겨진 내부 B-Rep 핀으로 연결하고 `ShapeUpgrade_UnifySameDomain`으로 동일 평면·곡면을 통합합니다.
+- **외벽 안쪽 해석적 B-Rep 내부 코어**: 외피에서 안전 여백(`core_inset_mm`) 안쪽 영역에 멀티스레드 Embree 3축 점유 스윕과 26방향 하늘 가시성 보호(방열핀 골짜기·외부 홈 유출 방지)를 적용하고, 동일 단면 연속 슬랩 병합 및 보수적 동축 원통 병합으로 불필요한 내부 분할을 줄인 해석적 원통(`MakeCylinder`)·다각 프리즘(`MakePrism`) 코어를 생성합니다.
+- **정밀 우선 Boolean Fuse**: `fuzzy=0.0` 병렬 다중 도구 결합을 우선 시도하고 부피 보존 검증을 수행해 SolidWorks·CATIA·NX의 미세 필렛과 탄젠트 엣지 손상을 방지하며, 폴백 시 공간 근접 기반 균형 이진 트리($O(N \log N)$) 병합을 사용합니다.
+- **밀폐 내부 공동(Closed Void Shell) 완전 제거**: 최종 후처리 단계에서 다중 쉘 내부 공동(`BRepClass3d.OuterShell_s` + `BRepBuilderAPI_MakeSolid`)뿐만 아니라 단일 쉘 내부에 숨어 있는 비연결 내부 공동 컴포넌트(고속 `Face→Edge` 인덱스 인접 그래프 BFS)까지 모두 소거하여, 단면 절단 시 속이 완전히 꽉 찬 솔리드를 보장합니다.
+- **이종 CAD 커널 및 OpenCASCADE CAD Assistant 호환성**: 3D 커브 기반 STEP 정규화, 정밀도 허용 오차 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, `ShapeFix_FixSmallFace` 미세 슬리버 정리, 무왜곡 곡선 엣지 분할, 병렬 `BRepCheck_Analyzer` 검증을 적용하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 단면 캡핑까지 정상 Solid로 표시됩니다.
+- **공차 분리 외관 부품 연결 및 동일 곡면 통합**: 멀티스레드 `cKDTree(workers=-1)` 탐색으로 미세 공차로 떠 있는 외관 부품(커넥터·볼트 등)을 숨겨진 내부 B-Rep 핀으로 연결하고 `ShapeUpgrade_UnifySameDomain`으로 동일 평면·곡면을 통합합니다.
 
-### 4. 프리징 없는 Modern Flat GUI (`tkinter` / `ttk`)
-- **하나의 창에서 두 가지 모드 탭**: **Single Mode**(부품 테이블 기반 대화형 4단계 워크플로우)와 **Batch Mode**(`config.json` 기반 다중 파일 순차 처리)를 즉시 전환할 수 있으며, 모드별로 독립된 백그라운드 CAD 워커를 사용해 서로 블로킹하지 않습니다.
-- **전용 백그라운드 CAD 프로세스 분리 (`multiprocessing`)**: 무거운 OpenCASCADE C++ 연산을 상주형 워커 프로세스에서 처리하므로 GUI 창이 절대 멈추지(`응답 없음`) 않습니다.
+### 4. 프리징 없는 Modern Flat GUI (`tkinter` / `ttk`) 및 멀티코어 배치 풀
+- **하나의 창에서 두 가지 모드 탭**: **Single Mode**(부품 테이블 기반 대화형 4단계 워크플로우)와 **Batch Mode**(`config.json` 기반 다중 파일 병렬 처리)를 즉시 전환할 수 있으며, 모드별로 독립된 백그라운드 CAD 워커를 사용해 서로 블로킹하지 않습니다.
+- **전용 백그라운드 CAD 프로세스 풀 (`multiprocessing`)**: 무거운 OpenCASCADE C++ 연산을 상주형 워커 프로세스(들)에서 처리하므로 GUI 창이 절대 멈추지(`응답 없음`) 않습니다. Batch Mode는 `config.json`의 `batch_workers`(`0` = Auto)에 따라 다중 워커를 병렬 실행하며, 워커별 `OSD_ThreadPool`과 Embree 스레드 예산을 자동 분할해 코어 과구독을 방지합니다.
 - **실시간 작업 상태 배너**: 작업 중 회전 스피너, 실시간 경과 타이머, 연속 펄스 진행 바, 2단계 `Cancel / Force Stop` 버튼을 표시하며 창 제목에도 경과 시간을 반영합니다.
 - **Bold 강조 4단계 워크플로우 바 및 상태 피드백**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` 버튼이 굵은(Bold) 폰트로 강조되며 대기 / 실행 중(파랑 `●`) / 정상 완료(녹색 `✔`) 상태로 자동 전환됩니다. 부품 선택을 수동 수정하면 하위 단계 상태가 자동 초기화됩니다.
 - **깔끔하고 컴팩트한 레이아웃**: 우측 고급 파라미터 패널은 기본 숨김 상태이며 필요할 때만 툴바의 **[Parameters]** 버튼으로 토글해 조정할 수 있습니다.
@@ -97,8 +98,11 @@ uv run simple-3d-step a.step b.step   # Batch Mode 탭에 2개 파일 대기
 
 ### 3. CLI 배치 모드 실행
 ```powershell
-# 기본 실행 (입력 파일과 같은 폴더에 *_simplified.step 생성)
+# 단일 파일 실행 (입력 파일과 같은 폴더에 *_simplified.step 생성)
 uv run simple-3d-step --cli -i assembly.step -o assembly_simplified.step
+
+# 다중 파일 병렬 배치 실행 (-j 0 = 자동 워커 풀, 또는 -j 4처럼 명시)
+uv run simple-3d-step --cli a.step b.step c.step d.step -j 4
 
 # 전체 CLI 옵션 확인
 run_simple_3d_step.bat --help
@@ -116,6 +120,7 @@ run_simple_3d_step.bat --help
 | `--max-hole-dia` | `10.0` | `--remove-holes` 사용 시 막을 최대 구멍 직경 (`mm`) |
 | `--no-core` / `--no-unify` | `False` | 내부 코어 채움 / 동일 곡면 통합 비활성화 |
 | `--schema` | `AP214` | 출력 STEP 스키마 (`AP214`, `AP242`, `AP203`) |
+| `-j`, `--jobs` | `0` | 다중 파일 CLI 배치 병렬 워커 프로세스 수 (`0` = 자동) |
 
 ### 4. 모드 탭 — Single Mode / Batch Mode
 
@@ -123,12 +128,12 @@ GUI 상단의 탭으로 언제든 두 가지 모드를 전환할 수 있습니�
 
 **Single Mode** — 아래에 설명된 대화형 4단계 워크플로우 (어셈블리 1개 열기 → 부품 분석 → 변환 → 저장).
 
-**Batch Mode** — `config.json` 파라미터로 동작하는 다중 파일 대기열:
+**Batch Mode** — `config.json` 파라미터로 동작하는 다중 파일 병렬 대기열:
 
 - **[Add STEP Files...]** (`Ctrl+O`)로 여러 개의 `.step` / `.stp` 파일을 한 번에 선택할 수 있고, **[Remove Selected]** / **[Clear List]**로 목록을 정리합니다.
-- **[RUN]** (`F5`)을 누르면 대기 중인 모든 파일(또는 행을 선택한 경우 선택된 파일만)이 `config.json`의 파라미터로 **순차적**으로 simplify됩니다. 파라미터는 RUN을 누를 때마다 다시 읽습니다.
+- **[RUN]** (`F5`)을 누르면 대기 중인 모든 파일(또는 행을 선택한 경우 선택된 파일만)이 `config.json`의 파라미터와 상주형 CAD 워커 풀(`batch_workers`, `0` = Auto)로 **병렬** simplify됩니다. 파라미터는 RUN을 누를 때마다 다시 읽습니다.
 - 생성된 결과는 **각 원본 파일과 같은 폴더**에 `<파일명>_simplified.step`으로 저장됩니다.
-- **[Stop]** (`Esc`)은 현재 파일을 취소하고 남은 파일을 건너뛰며, **[Force Stop]**은 C++ 연산이 멈추지 않을 때 백그라운드 CAD 워커를 즉시 종료 후 재시작합니다.
+- **[Stop]** (`Esc`)은 실행 중인 파일들을 취소하고 남은 파일을 건너뛰며, **[Force Stop]**은 C++ 연산이 멈추지 않을 때 활성 백그라운드 CAD 워커를 즉시 종료 후 재시작합니다.
 - 배치가 실행 중이면 다른 탭을 보고 있어도 Batch 탭 라벨에 진행 상황(`● Batch Mode (2/5)`)이 표시됩니다. 모드별로 독립된 백그라운드 CAD 워커를 사용하므로 서로 블로킹하지 않습니다.
 
 ---
@@ -161,9 +166,12 @@ GUI 상단의 탭으로 언제든 두 가지 모드를 전환할 수 있습니�
   "max_island_gap_mm": 3.0,
   "remove_small_holes": false,
   "unify_same_domain": true,
-  "step_schema": "AP214"
+  "step_schema": "AP214",
+  "batch_workers": 0
 }
 ```
+
+> `batch_workers: 0`은 시스템 CPU 코어 수에 맞춰 워커 풀 크기를 자동 산정합니다(처리량과 워커당 RAM 균형을 위해 최대 6워커, 워커별 스레드 예산 자동 분할). 순차 실행을 원하면 `1`, 직접 지정하려면 원하는 정수 `N`을 설정하세요.
 
 ---
 
@@ -188,17 +196,17 @@ SIMPLE_3D_STEP/
 │   ├── config.py                    # config.json 저장/로드 및 외부 뷰어 실행
 │   ├── models.py                    # 부품/분석/솔리드화/검증 데이터 모델
 │   ├── core/
-│   │   ├── occt_compat.py           # OCCT 7.x / 8.x 호환 래퍼
+│   │   ├── occt_compat.py           # OCCT 7.x / 8.x 호환, 병렬 런타임 설정 및 BinTools IPC
 │   │   ├── step_io.py               # XCAF STEP 읽기 및 정규화 STEP 저장
-│   │   ├── tessellation.py          # 부품/면 매핑 유지 OCCT -> trimesh 테셀레이션
-│   │   ├── visibility.py            # Intel Embree 2-Pass 외부 가시성 분석 엔진
+│   │   ├── tessellation.py          # 병렬 버킷 OCCT -> trimesh 테셀레이션 및 서브셋 재사용
+│   │   ├── visibility.py            # 멀티스레드 Intel Embree 2-Pass 외부 가시성 분석 엔진
 │   │   ├── solidifier.py            # 외관 보존 정밀 B-Rep 솔리드화 및 내부 공동 소거 엔진
-│   │   ├── validator.py             # BRepCheck_Analyzer 및 해석 곡면 구성 검증
-│   │   └── worker.py                # GUI 프리징 방지용 상주형 multiprocessing CAD 워커
+│   │   ├── validator.py             # 병렬 BRepCheck_Analyzer 및 해석 곡면 구성 검증
+│   │   └── worker.py                # 스레드 예산 제어가 포함된 상주형 multiprocessing CAD 워커
 │   └── gui/
 │       ├── theme.py                 # Modern Flat (Slate & Cobalt) 디자인 토큰 및 ttk 테마
 │       ├── app.py                   # 통합 GUI 창: Single/Batch 모드 탭 + 4단계 워크플로우
-│       ├── batch_panel.py           # Batch 모드 탭 (config.json 기반 다중 파일 순차 RUN)
+│       ├── batch_panel.py           # Batch 모드 탭 (config.json 기반 다중 워커 병렬 RUN)
 │       ├── part_tree.py             # 어셈블리 부품 테이블 (검색/필터/정렬/수동 토글)
 │       ├── control_panel.py         # 토글형 고급 파라미터 및 결과 요약 패널
 │       ├── busy_banner.py           # 백그라운드 작업 애니메이션 배너
@@ -208,9 +216,10 @@ SIMPLE_3D_STEP/
     ├── generate_sample_step.py      # 자동 테스트용 합성 STEP 어셈블리 생성기
     ├── test_visibility.py           # 내부 부품 식별 정확도 테스트
     ├── test_solidifier.py           # 정밀 B-Rep 단일 Solid 및 내부 공동 소거 테스트
+    ├── test_multicore.py            # 멀티코어 Embree 결정성·버킷 메싱·병렬 CLI 배치 테스트
     ├── test_worker.py               # 멀티프로세싱 비차단 파이프라인 테스트
     ├── test_gui_layout.py           # Modern Flat 레이아웃·Bold 워크플로우 바·토글·저장 경로 테스트
-    ├── test_batch_gui.py            # 모드 탭·배치 파라미터 매핑·동일 폴더 저장·순차 실행 테스트
+    ├── test_batch_gui.py            # 모드 탭·배치 파라미터 매핑·동일 폴더 저장·배치 실행 테스트
     └── test_config_and_cli.py       # 설정 저장 및 CLI 엔드투엔드 테스트
 ```
 

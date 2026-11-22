@@ -16,5 +16,6 @@
   "max_hole_diameter": 10.0,
   "unify_same_domain": true,
   "keep_largest_only": true,
-  "step_schema": "AP214"
+  "step_schema": "AP214",
+  "batch_workers": 0
 }
