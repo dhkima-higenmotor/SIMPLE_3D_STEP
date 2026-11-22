@@ -82,7 +82,7 @@ flowchart TB
 
 Notation used below: $D$ is the assembly bounding-box diagonal, $D_i$ a part diagonal,
 $A_i$ a part's B-Rep surface area, $T$ the triangle count, and $\tau$ the minimum visible
-ratio $\tau$ (`min_visible_ratio_pct / 100`).
+ratio (`min_visible_ratio_pct / 100`).
 
 ---
 
