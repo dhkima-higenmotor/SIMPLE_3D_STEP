@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -22,6 +24,10 @@ class AppConfig:
     viewer_args: str = "{file}"
     last_open_dir: str = ""
     last_save_dir: str = ""
+
+    # GUI appearance (empty ui_font_family = Auto OS default)
+    ui_font_family: str = ""
+    ui_font_size: int = 9
 
     # Default visibility analysis parameters
     num_views: int = 64
@@ -65,8 +71,49 @@ def threads_per_batch_worker(num_workers: int) -> int:
 
 
 def get_default_config_path() -> Path:
-    """Return the path to config.json in the project root / current working directory."""
-    return Path.cwd() / DEFAULT_CONFIG_FILENAME
+    """Return the path to config.json in the current working directory or project root."""
+    env_override = os.environ.get("SIMPLE_3D_STEP_CONFIG", "").strip()
+    if env_override:
+        return Path(env_override).expanduser()
+
+    cwd_cfg = Path.cwd() / DEFAULT_CONFIG_FILENAME
+    if cwd_cfg.exists():
+        return cwd_cfg
+
+    # When launched from another directory (e.g. via run_simple_3d_step.sh), prefer the
+    # repository/project root config.json if this is a source checkout.
+    project_root = Path(__file__).resolve().parents[2]
+    root_cfg = project_root / DEFAULT_CONFIG_FILENAME
+    if (project_root / "pyproject.toml").is_file() and root_cfg.is_file():
+        return root_cfg
+
+    return cwd_cfg
+
+
+def default_viewer_label() -> str:
+    """Return a platform-appropriate label for the OS default STEP viewer."""
+    if os.name == "nt":
+        return "(Windows Default Application)"
+    if sys.platform == "darwin":
+        return "(macOS Default Application)"
+    return "(System Default Application / xdg-open)"
+
+
+def resolve_viewer_executable(exe: str) -> Optional[Path]:
+    """Resolve a configured viewer path, supporting ~ expansion and commands on PATH."""
+    cleaned = exe.strip()
+    if not cleaned:
+        return None
+
+    candidate = Path(cleaned).expanduser()
+    if candidate.is_file():
+        return candidate
+
+    found = shutil.which(cleaned)
+    if found:
+        return Path(found)
+
+    return None
 
 
 def load_config(config_path: Optional[Path] = None) -> AppConfig:
@@ -105,33 +152,49 @@ def launch_external_viewer(step_file: Path, config: AppConfig) -> str:
 
     exe = config.viewer_executable.strip()
     if exe:
-        exe_path = Path(exe)
-        if not exe_path.exists():
+        exe_path = resolve_viewer_executable(exe)
+        if exe_path is None:
             raise FileNotFoundError(
-                f"Configured external 3D viewer executable not found:\n{exe_path}\n"
-                "Please verify the path in Viewer Settings."
+                f"Configured external 3D viewer executable not found:\n{exe}\n"
+                "Please verify the path in Viewer Settings (or clear it to use the system default application)."
             )
 
         args_template = (config.viewer_args or "{file}").strip()
+        posix_split = os.name != "nt"
         if "{file}" in args_template:
             placeholder = "__STEP_FILE_PLACEHOLDER__"
-            parsed = shlex.split(args_template.replace("{file}", placeholder), posix=False)
+            parsed = shlex.split(args_template.replace("{file}", placeholder), posix=posix_split)
             cmd_args = [
                 str(target) if tok == placeholder else tok.replace(placeholder, str(target))
                 for tok in parsed
             ]
         else:
-            parsed = shlex.split(args_template, posix=False) if args_template else []
+            parsed = shlex.split(args_template, posix=posix_split) if args_template else []
             cmd_args = parsed + [str(target)]
 
         cmd = [str(exe_path)] + cmd_args
-        subprocess.Popen(cmd)
+        popen_kwargs: dict[str, object] = {}
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
         return f"Launched external viewer: {exe_path.name} ({target.name})"
 
     if os.name == "nt":
         os.startfile(str(target))  # type: ignore[attr-defined]
         return f"Opened with Windows default application: {target.name}"
 
+    if sys.platform == "darwin":
+        opener = shutil.which("open")
+        if opener:
+            subprocess.Popen([opener, str(target)], start_new_session=True)
+            return f"Opened with macOS default application: {target.name}"
+    else:
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.Popen([opener, str(target)], start_new_session=True)
+            return f"Opened with system default application (xdg-open): {target.name}"
+
     raise RuntimeError(
-        "No external 3D viewer executable configured. Set it in config.json or Viewer Settings."
+        "No external 3D viewer executable configured and no system opener (xdg-open/open) found. "
+        "Set viewer_executable in config.json or Viewer Settings."
     )

@@ -58,11 +58,11 @@ Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / 
 
 ## Requirements & Installation
 
-- **OS**: Windows (64-bit)
+- **OS**: Windows (64-bit) or Linux (64-bit; GUI requires X11/Wayland + `tkinter`)
 - **Python**: 3.13+ (managed with [uv](https://docs.astral.sh/uv/))
 - **Core Libraries**: `cadquery-ocp-novtk` (OCCT 8.x), `trimesh`, `embreex` (Intel Embree), `rtree`, `numpy`, `scipy`, `scikit-image` (2D internal core contour extraction)
 
-```powershell
+```bash
 # Sync dependencies
 uv sync
 ```
@@ -71,10 +71,19 @@ uv sync
 
 ## Usage
 
-### 1. Launch via Batch File (Recommended on Windows)
-- **Double-click** `run_simple_3d_step.bat` in File Explorer to launch the unified GUI without a console window.
-- **Drag and drop** a single `.step` / `.stp` file onto `run_simple_3d_step.bat` to open it immediately in **Single Mode**.
-- **Drag and drop several** STEP files at once to open the **Batch Mode** tab with all of them queued.
+### 1. Launch via Launcher Script (Windows & Linux)
+- **Windows (`run_simple_3d_step.bat`)**:
+  - **Double-click** `run_simple_3d_step.bat` in File Explorer to launch the unified GUI without a console window.
+  - **Drag and drop** a single `.step` / `.stp` file onto `run_simple_3d_step.bat` to open it immediately in **Single Mode**.
+  - **Drag and drop several** STEP files at once to open the **Batch Mode** tab with all of them queued.
+- **Linux (`run_simple_3d_step.sh`)**:
+  ```bash
+  ./run_simple_3d_step.sh                        # Single Mode GUI
+  ./run_simple_3d_step.sh --batch                # Batch Mode GUI
+  ./run_simple_3d_step.sh path/to/assembly.step  # Open directly in Single Mode
+  ./run_simple_3d_step.sh a.step b.step          # Open Batch Mode with files queued
+  ./run_simple_3d_step.sh --cli -i model.step    # Headless CLI mode
+  ```
 - On first run, if `.venv` does not exist yet, `uv sync` is executed automatically.
 
 ### 2. Launch GUI from Command Line
@@ -137,14 +146,16 @@ The GUI has two tabs, switchable at any time from the top of the window (see the
 
 ---
 
-## External 3D Viewer Configuration (`config.json`)
+## External 3D Viewer & GUI Font Configuration (`config.json`)
 
-Configure your preferred external 3D viewer in `config.json` (project root) or via **[Viewer Settings]** in the GUI. Leaving `viewer_executable` empty opens STEP files with the default Windows file association.
+Configure your preferred external 3D viewer and GUI font (`ui_font_family`, `ui_font_size`) in `config.json` (project root) or via **[Settings]** in the GUI. Leaving `viewer_executable` empty opens STEP files with the system default file association (Windows default application / Linux `xdg-open` / macOS `open`). On Linux, you may specify either an absolute path (e.g. `"/usr/bin/freecad"`) or a command on `PATH` (e.g. `"freecad"`). Font changes apply immediately without restarting; leaving `ui_font_family` empty uses the automatic OS default (`Segoe UI` on Windows, `Noto Sans` / `DejaVu Sans` on Linux).
 
 ```json
 {
   "viewer_executable": "C:\\Program Files\\FreeCAD 1.0\\bin\\freecad.exe",
   "viewer_args": "{file}",
+  "ui_font_family": "",
+  "ui_font_size": 9,
   "num_views": 64,
   "grid_resolution": 160,
   "min_visible_ratio_pct": 0.5,
@@ -173,6 +184,7 @@ SIMPLE_3D_STEP/
 ├── config.json                      # External 3D viewer path and default parameters
 ├── pyproject.toml                   # uv project metadata and dependencies
 ├── run_simple_3d_step.bat           # Windows launcher (Single/Batch tabbed GUI, drag-and-drop, CLI)
+├── run_simple_3d_step.sh            # Linux/POSIX launcher (auto uv sync, GUI & headless CLI)
 ├── docs/
 │   ├── screenshots/                 # README GUI screenshots (Single Mode / Batch Mode)
 │   ├── theory.md                    # Key Features expanded into math & algorithms (English)

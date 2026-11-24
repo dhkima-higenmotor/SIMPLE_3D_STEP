@@ -255,13 +255,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     start_mode = "batch" if (args.batch or len(step_files) > 1) else "single"
     initial_step = step_files[0] if (step_files and start_mode == "single") else None
 
+    import tkinter as tk
     from simple_3d_step.gui.app import Simple3DStepApp
 
-    app = Simple3DStepApp(
-        initial_step=initial_step,
-        initial_files=step_files,
-        start_mode=start_mode,
-    )
+    try:
+        app = Simple3DStepApp(
+            initial_step=initial_step,
+            initial_files=step_files,
+            start_mode=start_mode,
+        )
+    except tk.TclError as exc:
+        print(
+            f"[ERROR] Failed to initialize GUI display: {exc}\n"
+            "If running on a headless Linux environment, use --cli mode instead, e.g.:\n"
+            "  simple-3d-step --cli -i /path/to/assembly.step",
+            file=sys.stderr,
+        )
+        return 1
+
     app.mainloop()
     return 0
 

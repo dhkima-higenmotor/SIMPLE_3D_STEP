@@ -58,11 +58,11 @@
 
 ## 요구 환경 및 설치
 
-- **OS**: Windows (64-bit)
+- **OS**: Windows (64-bit) 또는 Linux (64-bit; GUI 실행 시 X11/Wayland + `tkinter` 필요)
 - **Python**: 3.13 이상 ([uv](https://docs.astral.sh/uv/) 패키지 매니저 사용)
 - **핵심 라이브러리**: `cadquery-ocp-novtk` (OCCT 8.x), `trimesh`, `embreex` (Intel Embree), `rtree`, `numpy`, `scipy`, `scikit-image` (2D 내부 코어 윤곽 추출용)
 
-```powershell
+```bash
 # 의존성 동기화
 uv sync
 ```
@@ -71,10 +71,19 @@ uv sync
 
 ## 실행 방법
 
-### 1. 배치 파일로 실행 (Windows 권장)
-- 파일 탐색기에서 `run_simple_3d_step.bat`을 **더블클릭**하면 콘솔 창 없이 통합 GUI가 실행됩니다.
-- `.step` / `.stp` 파일 **1개**를 `run_simple_3d_step.bat` 아이콘 위로 **드래그 앤 드롭**하면 **Single Mode** 탭에서 바로 열립니다.
-- **여러 개**의 STEP 파일을 한꺼번에 드롭하면 **Batch Mode** 탭에 모두 대기 목록으로 추가된 상태로 실행됩니다.
+### 1. 런처 스크립트로 실행 (Windows / Linux 권장)
+- **Windows (`run_simple_3d_step.bat`)**:
+  - 파일 탐색기에서 `run_simple_3d_step.bat`을 **더블클릭**하면 콘솔 창 없이 통합 GUI가 실행됩니다.
+  - `.step` / `.stp` 파일 **1개**를 `run_simple_3d_step.bat` 아이콘 위로 **드래그 앤 드롭**하면 **Single Mode** 탭에서 바로 열립니다.
+  - **여러 개**의 STEP 파일을 한꺼번에 드롭하면 **Batch Mode** 탭에 모두 대기 목록으로 추가된 상태로 실행됩니다.
+- **Linux (`run_simple_3d_step.sh`)**:
+  ```bash
+  ./run_simple_3d_step.sh                        # Single Mode GUI 실행
+  ./run_simple_3d_step.sh --batch                # Batch Mode GUI 실행
+  ./run_simple_3d_step.sh path/to/assembly.step  # Single Mode에서 파일 바로 열기
+  ./run_simple_3d_step.sh a.step b.step          # Batch Mode 대기열에 추가하여 실행
+  ./run_simple_3d_step.sh --cli -i model.step    # 헤드리스 CLI 모드 실행
+  ```
 - 최초 실행 시 `.venv` 가상환경이 없으면 자동으로 `uv sync`를 수행합니다.
 
 ### 2. 명령줄에서 GUI 실행
@@ -137,14 +146,16 @@ GUI 상단의 탭으로 언제든 두 가지 모드를 전환할 수 있습니�
 
 ---
 
-## 외부 3D 뷰어 설정 (`config.json`)
+## 외부 3D 뷰어 및 GUI 폰트 설정 (`config.json`)
 
-프로젝트 루트의 `config.json` 또는 GUI 상단의 **[Viewer Settings]**에서 외부 3D 뷰어 실행 파일 경로를 지정할 수 있습니다. `viewer_executable`을 비워 두면 Windows 기본 연결 프로그램으로 STEP 파일을 엽니다.
+프로젝트 루트의 `config.json` 또는 GUI 상단의 **[Settings]**에서 외부 3D 뷰어 경로와 GUI 폰트(`ui_font_family`, `ui_font_size`)를 설정할 수 있습니다. `viewer_executable`을 비워 두면 시스템 기본 연결 프로그램(Windows 기본 앱 / Linux `xdg-open` / macOS `open`)으로 STEP 파일을 엽니다. Linux에서는 절대 경로(예: `"/usr/bin/freecad"`)뿐 아니라 `PATH`에 등록된 명령어(예: `"freecad"`)도 그대로 지정할 수 있습니다. GUI 폰트는 저장 즉시 재시작 없이 반영되며, `ui_font_family`를 비워 두면 OS 기본 폰트(Windows `Segoe UI`, Linux `Noto Sans` / `DejaVu Sans` 등)가 자동 선택됩니다.
 
 ```json
 {
   "viewer_executable": "C:\\Program Files\\FreeCAD 1.0\\bin\\freecad.exe",
   "viewer_args": "{file}",
+  "ui_font_family": "",
+  "ui_font_size": 9,
   "num_views": 64,
   "grid_resolution": 160,
   "min_visible_ratio_pct": 0.5,
@@ -173,6 +184,7 @@ SIMPLE_3D_STEP/
 ├── config.json                      # 외부 3D 뷰어 경로 및 기본 파라미터 설정
 ├── pyproject.toml                   # uv 프로젝트 메타데이터 및 의존성 정의
 ├── run_simple_3d_step.bat           # Windows 실행 배치 파일 (Single/Batch 탭 GUI, 드래그앤드롭, CLI 겸용)
+├── run_simple_3d_step.sh            # Linux/POSIX 실행 쉘 스크립트 (자동 uv sync, GUI 및 헤드리스 CLI)
 ├── docs/
 │   ├── screenshots/                 # README GUI 화면 캡처 (Single Mode / Batch Mode)
 │   ├── theory.md                    # 주요 특징의 수학·알고리즘 배경 (영문)

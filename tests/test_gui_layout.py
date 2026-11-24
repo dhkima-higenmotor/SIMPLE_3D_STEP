@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -22,12 +23,16 @@ def _isolate_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_packaged_window_icon_is_available() -> None:
-    """The app icon ships with the package and is a valid multi-size .ico."""
+    """The app icons ship with the package as valid .ico (Windows) and .png (Linux/macOS)."""
     import simple_3d_step.gui.app as app_module
 
-    icon = Path(app_module.__file__).with_name("assets") / "app.ico"
-    assert icon.is_file()
-    assert icon.read_bytes()[:4] == b"\x00\x00\x01\x00"
+    assets_dir = Path(app_module.__file__).with_name("assets")
+    icon_ico = assets_dir / "app.ico"
+    icon_png = assets_dir / "app.png"
+    assert icon_ico.is_file()
+    assert icon_ico.read_bytes()[:4] == b"\x00\x00\x01\x00"
+    assert icon_png.is_file()
+    assert icon_png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_gui_default_layout_no_menu_no_clipping_and_params_toggle() -> None:
@@ -36,9 +41,14 @@ def test_gui_default_layout_no_menu_no_clipping_and_params_toggle() -> None:
         app.update()
         ww = app.winfo_width()
         wh = app.winfo_height()
+        req_w = app.winfo_reqwidth()
+        req_h = app.winfo_reqheight()
         # 1. Menu bar removed & compact default window size
+        # (Check requested size on all platforms; tiling WMs on Linux may override mapped size)
         assert app.cget("menu") == ""
-        assert ww <= 1160 and wh <= 780
+        assert req_w <= 1160 and req_h <= 780
+        if sys.platform == "win32":
+            assert ww <= 1160 and wh <= 780
         # 2. Both toolbar rows fit horizontally inside compact window with large fonts
         assert app._toolbar_row1.winfo_reqwidth() <= ww
         assert app._toolbar_row2.winfo_reqwidth() <= ww
@@ -163,6 +173,58 @@ def test_workflow_step_buttons_visual_completion_states() -> None:
         assert app._step_states["save"] == "idle"
         for key in ("simplify", "save"):
             assert "bold" in str(app._step_buttons[key][0].cget("font")).lower()
+    finally:
+        app._on_close()
+
+
+def test_custom_ui_font_live_update_and_settings_dialog_persistence(tmp_path: Path) -> None:
+    """Changing GUI font in SettingsDialog updates named Tk fonts immediately and saves to config.json."""
+    import tkinter.font as tkfont
+
+    from simple_3d_step.config import load_config
+    from simple_3d_step.gui.settings_dialog import SettingsDialog
+    from simple_3d_step.gui.theme import list_available_font_families, update_ui_font
+
+    app = Simple3DStepApp()
+    try:
+        app.update()
+        fams = list_available_font_families(app)
+        chosen_family = fams[0] if fams else "DejaVu Sans"
+
+        # Direct live font update reconfigures named fonts immediately
+        applied_family, applied_size = update_ui_font(app, chosen_family, 12)
+        assert applied_size == 12
+        base_font = tkfont.nametofont("s3d_base", root=app)
+        bold_font = tkfont.nametofont("s3d_base_bold", root=app)
+        assert base_font.cget("size") == 12
+        assert bold_font.cget("size") == 12
+        assert bold_font.cget("weight") == "bold"
+        assert base_font.cget("family") == applied_family
+
+        # SettingsDialog saves font selection into config.json and triggers live update callback
+        saved_configs = []
+        dlg = SettingsDialog(
+            app,
+            app._config,
+            app._config_path,
+            on_saved=lambda cfg: (
+                saved_configs.append(cfg),
+                update_ui_font(app, cfg.ui_font_family, cfg.ui_font_size),
+            ),
+        )
+        dlg._font_family_var.set(chosen_family)
+        dlg._font_size_var.set("11")
+        dlg._save()
+        app.update()
+
+        assert len(saved_configs) == 1
+        assert saved_configs[0].ui_font_family == chosen_family
+        assert saved_configs[0].ui_font_size == 11
+        assert tkfont.nametofont("s3d_base", root=app).cget("size") == 11
+
+        reloaded = load_config(app._config_path)
+        assert reloaded.ui_font_family == chosen_family
+        assert reloaded.ui_font_size == 11
     finally:
         app._on_close()
 

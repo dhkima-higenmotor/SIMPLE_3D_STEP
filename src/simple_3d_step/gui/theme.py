@@ -6,12 +6,17 @@ Emerald-600 primary actions, Rose-500 danger actions, and crisp DPI-aware Segoe 
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
+from typing import Optional
 
 
 def enable_dpi_awareness() -> None:
     """Make the process DPI-aware on Windows to render sharp system fonts (matching AUTO_RENDER)."""
+    if sys.platform != "win32":
+        return
     try:
         import ctypes
 
@@ -24,19 +29,129 @@ def enable_dpi_awareness() -> None:
 enable_dpi_awareness()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Centralized System Font Definitions (Identical to AUTO_RENDER_GUI)
-# ═══════════════════════════════════════════════════════════════════
-SYSTEM_FONT = ("Segoe UI", 9)
-SYSTEM_FONT_BOLD = ("Segoe UI", 9, "bold")
-SYSTEM_FONT_LARGE_BOLD = ("Segoe UI", 10, "bold")
+def _initial_font_family() -> str:
+    """Return a sensible platform default UI font family before Tk is initialized."""
+    if sys.platform == "win32":
+        return "Segoe UI"
+    if sys.platform == "darwin":
+        return "Helvetica Neue"
+    return "DejaVu Sans"
 
-FONTS = {
+
+# ═══════════════════════════════════════════════════════════════════
+# Font Discovery, Validation, and Live-Updating Named Tk Fonts
+# ═══════════════════════════════════════════════════════════════════
+MIN_UI_FONT_SIZE = 7
+MAX_UI_FONT_SIZE = 20
+DEFAULT_UI_FONT_SIZE = 9
+
+_NAMED_FONT_BASE = "s3d_base"
+_NAMED_FONT_BOLD = "s3d_base_bold"
+_NAMED_FONT_HEADING = "s3d_heading_bold"
+_NAMED_FONT_CHEVRON = "s3d_chevron"
+
+
+def normalize_ui_font_size(size: object) -> int:
+    """Clamp user-specified UI font size (pt) to a safe readable range."""
+    try:
+        val = int(round(float(size)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_UI_FONT_SIZE
+    if val <= 0:
+        return DEFAULT_UI_FONT_SIZE
+    return max(MIN_UI_FONT_SIZE, min(MAX_UI_FONT_SIZE, val))
+
+
+def has_xft_font_support(root: Optional[tk.Misc] = None) -> bool:
+    """Return True when Tk renders anti-aliased system fonts (always True on Windows/macOS)."""
+    if sys.platform in ("win32", "darwin") or root is None:
+        return True
+    try:
+        fontsystem = str(root.tk.call("::tk::pkgconfig", "get", "fontsystem")).lower()
+        return fontsystem == "xft"
+    except Exception:
+        try:
+            return len(set(tkfont.families(root))) > 5
+        except Exception:
+            return False
+
+
+def list_available_font_families(root: Optional[tk.Misc] = None) -> list[str]:
+    """Return deduplicated, sorted UI-usable font families installed in Tk."""
+    if root is None:
+        return []
+    try:
+        fams = {
+            str(f).strip()
+            for f in tkfont.families(root)
+            if str(f).strip() and not str(f).startswith("@")
+        }
+        return sorted(fams, key=lambda name: name.casefold())
+    except Exception:
+        return []
+
+
+def resolve_ui_font_family(root: Optional[tk.Misc] = None, preferred: str = "") -> str:
+    """Select the requested font family if provided, or the cleanest OS default sans-serif."""
+    req = (preferred or "").strip()
+    available_list = list_available_font_families(root)
+    available_ci = {f.casefold(): f for f in available_list}
+
+    if req:
+        if req.casefold() in available_ci:
+            return available_ci[req.casefold()]
+        # Pass through fontconfig/Tk aliases (e.g. "Sans", "TkDefaultFont") even if not listed
+        return req
+
+    if sys.platform == "win32":
+        return "Segoe UI"
+
+    candidates = (
+        ("SF Pro Text", "Helvetica Neue", "Helvetica")
+        if sys.platform == "darwin"
+        else (
+            "Noto Sans",
+            "Noto Sans CJK KR",
+            "Ubuntu",
+            "Cantarell",
+            "Adwaita Sans",
+            "DejaVu Sans",
+            "Liberation Sans",
+            "Inter",
+            "Roboto",
+            "FreeSans",
+            "Helvetica",
+        )
+    )
+
+    if root is not None:
+        for family in candidates:
+            if family.casefold() in available_ci:
+                return available_ci[family.casefold()]
+        try:
+            default_family = str(tkfont.nametofont("TkDefaultFont", root=root).actual("family"))
+            if default_family:
+                return default_family
+        except Exception:
+            pass
+    return _initial_font_family()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Centralized System Font Definitions (Cross-platform, Windows: Segoe UI)
+# ═══════════════════════════════════════════════════════════════════
+_DEFAULT_FAMILY = _initial_font_family()
+SYSTEM_FONT: object = (_DEFAULT_FAMILY, DEFAULT_UI_FONT_SIZE)
+SYSTEM_FONT_BOLD: object = (_DEFAULT_FAMILY, DEFAULT_UI_FONT_SIZE, "bold")
+SYSTEM_FONT_LARGE_BOLD: object = (_DEFAULT_FAMILY, DEFAULT_UI_FONT_SIZE + 1, "bold")
+
+FONTS: dict[str, object] = {
     "base": SYSTEM_FONT,
     "base_bold": SYSTEM_FONT_BOLD,
     "small": SYSTEM_FONT,
     "small_bold": SYSTEM_FONT_BOLD,
     "heading": SYSTEM_FONT_LARGE_BOLD,
+    "chevron": (_DEFAULT_FAMILY, DEFAULT_UI_FONT_SIZE + 2),
     "mono": SYSTEM_FONT,
     "mono_bold": SYSTEM_FONT_BOLD,
 }
@@ -125,8 +240,79 @@ STEP_STYLES = {
 }
 
 
-def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
+def _ensure_named_font(
+    root: tk.Misc,
+    name: str,
+    family: str,
+    size: int,
+    weight: str = "normal",
+) -> tkfont.Font:
+    """Create or reconfigure a named Tk font bound to `root` so all widgets update live."""
+    cache: dict[str, tkfont.Font] = getattr(root, "_s3d_named_fonts", None)  # type: ignore[assignment]
+    if cache is None:
+        cache = {}
+        setattr(root, "_s3d_named_fonts", cache)
+
+    existing = set(tkfont.names(root))
+    if name in existing:
+        f = cache.get(name) or tkfont.nametofont(name, root=root)
+        f.configure(family=family, size=size, weight=weight)
+        cache[name] = f
+        return f
+
+    f = tkfont.Font(root=root, name=name, family=family, size=size, weight=weight)
+    cache[name] = f
+    return f
+
+
+def update_ui_font(
+    root: tk.Misc,
+    font_family: str = "",
+    font_size: int = DEFAULT_UI_FONT_SIZE,
+) -> tuple[str, int]:
+    """Apply or live-update the GUI font family and size across all tk & ttk widgets."""
+    global SYSTEM_FONT, SYSTEM_FONT_BOLD, SYSTEM_FONT_LARGE_BOLD
+    family = resolve_ui_font_family(root, preferred=font_family)
+    size = normalize_ui_font_size(font_size)
+
+    _ensure_named_font(root, _NAMED_FONT_BASE, family, size, "normal")
+    _ensure_named_font(root, _NAMED_FONT_BOLD, family, size, "bold")
+    _ensure_named_font(root, _NAMED_FONT_HEADING, family, size + 1, "bold")
+    _ensure_named_font(root, _NAMED_FONT_CHEVRON, family, size + 2, "normal")
+
+    SYSTEM_FONT = _NAMED_FONT_BASE
+    SYSTEM_FONT_BOLD = _NAMED_FONT_BOLD
+    SYSTEM_FONT_LARGE_BOLD = _NAMED_FONT_HEADING
+
+    FONTS["base"] = _NAMED_FONT_BASE
+    FONTS["base_bold"] = _NAMED_FONT_BOLD
+    FONTS["small"] = _NAMED_FONT_BASE
+    FONTS["small_bold"] = _NAMED_FONT_BOLD
+    FONTS["heading"] = _NAMED_FONT_HEADING
+    FONTS["chevron"] = _NAMED_FONT_CHEVRON
+    FONTS["mono"] = _NAMED_FONT_BASE
+    FONTS["mono_bold"] = _NAMED_FONT_BOLD
+
+    for spec in STEP_STYLES.values():
+        spec["font"] = _NAMED_FONT_BOLD
+
+    # Keep Treeview row height comfortable when font size increases
+    try:
+        style = ttk.Style(root)
+        style.configure("Treeview", rowheight=max(24, int(round(size * 2.8))))
+    except Exception:
+        pass
+
+    return family, size
+
+
+def apply_modern_flat_theme(
+    root: tk.Tk,
+    font_family: str = "",
+    font_size: int = DEFAULT_UI_FONT_SIZE,
+) -> ttk.Style:
     """Configure all ttk widget styles using the AUTO_RENDER Slate + Indigo palette."""
+    _, applied_size = update_ui_font(root, font_family=font_family, font_size=font_size)
     C = COLORS
     root.configure(background=C["bg"])
 
@@ -533,7 +719,7 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
         fieldbackground=C["bg_dark"],
         bordercolor=C["border"],
         font=SYSTEM_FONT,
-        rowheight=26,
+        rowheight=max(24, int(round(applied_size * 2.8))),
     )
     style.configure(
         "Treeview.Heading",

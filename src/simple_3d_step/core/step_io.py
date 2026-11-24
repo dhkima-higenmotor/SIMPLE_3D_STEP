@@ -109,7 +109,7 @@ def _extract_solids_and_free_shells(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
 
 
 def _ensure_ascii_read_path(path: Path) -> tuple[Path, Optional[Path]]:
-    """If path contains non-ASCII chars on Windows, copy to a temp ASCII path for OCCT."""
+    """If path contains non-ASCII chars, copy to a temp ASCII path for OCCT safety."""
     path_str = str(path.resolve())
     try:
         path_str.encode("ascii")

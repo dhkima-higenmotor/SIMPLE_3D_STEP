@@ -102,11 +102,35 @@ class ControlPanel(tk.Frame):
         self._canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event) -> None:
-            if self._canvas.bbox("all") and self._canvas.bbox("all")[3] > self._canvas.winfo_height():
-                self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            bbox = self._canvas.bbox("all")
+            if not bbox or bbox[3] <= self._canvas.winfo_height():
+                return
+            num = getattr(event, "num", None)
+            if num == 4:
+                step = -3
+            elif num == 5:
+                step = 3
+            else:
+                delta = getattr(event, "delta", 0)
+                if delta == 0:
+                    return
+                step = int(-1 * (delta / 120))
+                if step == 0:
+                    step = -1 if delta > 0 else 1
+            self._canvas.yview_scroll(step, "units")
 
-        self._canvas.bind("<Enter>", lambda _e: self._canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        self._canvas.bind("<Leave>", lambda _e: self._canvas.unbind_all("<MouseWheel>"))
+        def _bind_wheel(_e=None) -> None:
+            self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            self._canvas.bind_all("<Button-4>", _on_mousewheel)
+            self._canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_wheel(_e=None) -> None:
+            self._canvas.unbind_all("<MouseWheel>")
+            self._canvas.unbind_all("<Button-4>")
+            self._canvas.unbind_all("<Button-5>")
+
+        self._canvas.bind("<Enter>", _bind_wheel)
+        self._canvas.bind("<Leave>", _unbind_wheel)
 
         nb = ttk.Notebook(body)
         nb.pack(fill=tk.X, expand=False)

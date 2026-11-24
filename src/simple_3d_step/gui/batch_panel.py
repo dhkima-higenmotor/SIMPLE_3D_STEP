@@ -14,6 +14,7 @@ stays responsive and a batch can be stopped at any time.
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -457,7 +458,7 @@ class BatchPanel(tk.Frame):
         if self._running:
             return
 
-        known = {str(item.path).casefold() for item in self._items}
+        known = {os.path.normcase(str(item.path)) for item in self._items}
         added = 0
         ignored = 0
         for raw in paths:
@@ -469,7 +470,7 @@ class BatchPanel(tk.Frame):
             if not path.is_file() or path.suffix.lower() not in STEP_SUFFIXES:
                 ignored += 1
                 continue
-            key = str(path).casefold()
+            key = os.path.normcase(str(path))
             if key in known:
                 ignored += 1
                 continue
@@ -499,7 +500,10 @@ class BatchPanel(tk.Frame):
             parent=self,
             title="Select STEP Files",
             initialdir=init_dir,
-            filetypes=[("STEP Files", "*.step;*.stp;*.STEP;*.STP"), ("All Files", "*.*")],
+            filetypes=[
+                ("STEP Files", ("*.step", "*.stp", "*.STEP", "*.STP")),
+                ("All Files", "*.*" if os.name == "nt" else "*"),
+            ],
         )
         if selected:
             self.queue_files([Path(p) for p in selected])

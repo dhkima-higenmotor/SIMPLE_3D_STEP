@@ -352,6 +352,18 @@ class CadWorkerClient:
         if self._cancel_event is not None:
             self._cancel_event.set()
 
+    def _close_queues(self) -> None:
+        """Close multiprocessing queues to avoid leaking pipe FDs on POSIX."""
+        for q_attr in ("_cmd_queue", "_evt_queue"):
+            q = getattr(self, q_attr, None)
+            if q is not None:
+                try:
+                    q.close()
+                    q.cancel_join_thread()
+                except Exception:
+                    pass
+                setattr(self, q_attr, None)
+
     def force_terminate_and_restart(self) -> None:
         """Immediately kill a C++-blocked worker process and spawn a clean replacement."""
         if self._proc is not None and self._proc.is_alive():
@@ -361,6 +373,7 @@ class CadWorkerClient:
                 self._proc.kill()
                 self._proc.join(timeout=2.0)
         self._proc = None
+        self._close_queues()
         self._active_cmd_id = None
         self._active_cmd_name = ""
         self._ready = False
@@ -402,6 +415,7 @@ class CadWorkerClient:
     def shutdown(self) -> None:
         """Cleanly terminate the background worker process on app exit."""
         if self._proc is None:
+            self._close_queues()
             return
         try:
             if self._cancel_event is not None:
@@ -416,3 +430,4 @@ class CadWorkerClient:
             pass
         finally:
             self._proc = None
+            self._close_queues()

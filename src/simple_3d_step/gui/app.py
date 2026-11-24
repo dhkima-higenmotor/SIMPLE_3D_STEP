@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import tempfile
 import tkinter as tk
 from pathlib import Path
@@ -12,6 +14,7 @@ import numpy as np
 
 from simple_3d_step.config import (
     AppConfig,
+    default_viewer_label,
     get_default_config_path,
     launch_external_viewer,
     load_config,
@@ -24,11 +27,22 @@ from simple_3d_step.gui.control_panel import ControlPanel
 from simple_3d_step.gui.log_panel import LogPanel
 from simple_3d_step.gui.part_tree import PartTreePanel
 from simple_3d_step.gui.settings_dialog import SettingsDialog
-from simple_3d_step.gui.theme import COLORS, FONTS, STEP_STYLES, apply_modern_flat_theme
+from simple_3d_step.gui.theme import (
+    COLORS,
+    FONTS,
+    STEP_STYLES,
+    apply_modern_flat_theme,
+    resolve_ui_font_family,
+    update_ui_font,
+)
 from simple_3d_step.models import AssemblyModel, SimplifyResult
 
 
 BASE_TITLE = "SIMPLE 3D STEP — Internal Part Removal & Exact B-Rep Solidifier"
+STEP_FILETYPES = [
+    ("STEP Files", ("*.step", "*.stp", "*.STEP", "*.STP")),
+    ("All Files", "*.*" if os.name == "nt" else "*"),
+]
 
 
 class Simple3DStepApp(tk.Tk):
@@ -90,35 +104,60 @@ class Simple3DStepApp(tk.Tk):
         self._active_step_key: Optional[str] = None
         self._active_step_prev_state: str = "idle"
 
-        apply_modern_flat_theme(self)
+        apply_modern_flat_theme(
+            self,
+            font_family=self._config.ui_font_family,
+            font_size=self._config.ui_font_size,
+        )
         self._build_layout()
         self._bind_shortcuts()
         self._update_ui_state()
 
         # Pre-fill the batch queue with any files passed on the command line
-        # (run_simple_3d_step.bat drag & drop supports several files at once)
+        # (run_simple_3d_step.bat / .sh drag & drop or CLI args support several files at once)
         self._batch_panel.queue_files(self._initial_files)
         self._select_mode(self._start_mode)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_after_id: Optional[str] = self.after(40, self._poll_worker)
 
-        viewer_info = self._config.viewer_executable or "(Windows Default Application)"
+        viewer_info = self._config.viewer_executable or default_viewer_label()
+        active_font = resolve_ui_font_family(self, preferred=self._config.ui_font_family)
         self._log_panel.append_log(f"Loaded config: {self._config_path}")
-        self._log_panel.append_log(f"External 3D viewer: {viewer_info}")
+        self._log_panel.append_log(
+            f"External 3D viewer: {viewer_info} · UI Font: {active_font} {self._config.ui_font_size}pt"
+        )
         self._log_panel.append_log("Starting background CAD worker process (freeze-free mode)...")
 
     def _set_window_icon(self) -> None:
-        """Apply the packaged app.ico to the window title bar / taskbar (best effort)."""
-        icon = Path(__file__).with_name("assets") / "app.ico"
-        if not icon.is_file():
-            return
-        try:
-            # Rounded tiles look best as the window/taskbar icon on every toplevel
-            self.iconbitmap(str(icon))
-            self.iconbitmap(default=str(icon))
-        except tk.TclError:
-            pass
+        """Apply the packaged app icon across Windows (.ico) and Linux/macOS (.png)."""
+        assets_dir = Path(__file__).with_name("assets")
+        ico_icon = assets_dir / "app.ico"
+        png_icon = assets_dir / "app.png"
+
+        if sys.platform == "win32" and ico_icon.is_file():
+            try:
+                # Rounded tiles look best as the window/taskbar icon on every toplevel
+                self.iconbitmap(str(ico_icon))
+                self.iconbitmap(default=str(ico_icon))
+                return
+            except tk.TclError:
+                pass
+
+        if png_icon.is_file():
+            try:
+                # Keep a strong reference so Tkinter PhotoImage is not garbage-collected
+                self._icon_photo = tk.PhotoImage(file=str(png_icon))
+                self.iconphoto(True, self._icon_photo)
+                return
+            except tk.TclError:
+                pass
+
+        if ico_icon.is_file():
+            try:
+                self.iconbitmap(str(ico_icon))
+            except tk.TclError:
+                pass
 
     def _bind_shortcuts(self) -> None:
         # Shortcuts are routed to whichever mode tab is currently active
@@ -278,7 +317,7 @@ class Simple3DStepApp(tk.Tk):
                 text="›",
                 background=COLORS["surface"],
                 foreground=COLORS["text_muted"],
-                font=("Segoe UI", 11),
+                font=FONTS["chevron"],
                 padx=4,
             ).pack(side=tk.LEFT)
 
@@ -324,9 +363,9 @@ class Simple3DStepApp(tk.Tk):
         )
         self._tb_view_res.pack(side=tk.LEFT)
 
-        # Right side: [Parameters] toggle button directly to the left of [Viewer Settings]
+        # Right side: [Parameters] toggle button directly to the left of [Settings]
         ttk.Button(
-            self._toolbar_row2, text="Viewer Settings", style="Toolbar.TButton", command=self._on_open_settings
+            self._toolbar_row2, text="Settings", style="Toolbar.TButton", command=self._on_open_settings
         ).pack(side=tk.RIGHT)
 
         self._tb_params = ttk.Checkbutton(
@@ -629,7 +668,7 @@ class Simple3DStepApp(tk.Tk):
             parent=self,
             title="Open 3D STEP File",
             initialdir=init_dir,
-            filetypes=[("STEP Files", "*.step;*.stp;*.STEP;*.STP"), ("All Files", "*.*")],
+            filetypes=STEP_FILETYPES,
         )
         if selected:
             path = Path(selected)
@@ -748,7 +787,7 @@ class Simple3DStepApp(tk.Tk):
             initialdir=init_dir,
             initialfile=default_name,
             defaultextension=".step",
-            filetypes=[("STEP Files", "*.step;*.stp"), ("All Files", "*.*")],
+            filetypes=STEP_FILETYPES,
         )
         if not selected:
             return
@@ -844,9 +883,14 @@ class Simple3DStepApp(tk.Tk):
     def _on_open_settings(self) -> None:
         def _saved(updated: AppConfig) -> None:
             self._config = updated
+            applied_family, applied_size = update_ui_font(
+                self, updated.ui_font_family, updated.ui_font_size
+            )
             self._batch_panel.reload_config()
-            viewer = updated.viewer_executable or "(Windows Default Application)"
-            self._log_panel.append_log(f"Settings saved — External 3D viewer: {viewer}")
+            viewer = updated.viewer_executable or default_viewer_label()
+            self._log_panel.append_log(
+                f"Settings saved — Viewer: {viewer} · UI Font: {applied_family} {applied_size}pt"
+            )
 
         SettingsDialog(self, self._config, self._config_path, on_saved=_saved)
 
