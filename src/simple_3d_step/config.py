@@ -70,6 +70,16 @@ def threads_per_batch_worker(num_workers: int) -> int:
     return max(1, cpu_cnt // max(1, int(num_workers)))
 
 
+def get_os_config_template_filename(platform: Optional[str] = None) -> Optional[str]:
+    """Return the OS-specific default config template filename (Windows or Linux)."""
+    plat = (platform if platform is not None else sys.platform).lower()
+    if plat.startswith("win") or (platform is None and os.name == "nt"):
+        return f"{DEFAULT_CONFIG_FILENAME}.win"
+    if plat.startswith("linux"):
+        return f"{DEFAULT_CONFIG_FILENAME}.linux"
+    return None
+
+
 def get_default_config_path() -> Path:
     """Return the path to config.json in the current working directory or project root."""
     env_override = os.environ.get("SIMPLE_3D_STEP_CONFIG", "").strip()
@@ -80,14 +90,52 @@ def get_default_config_path() -> Path:
     if cwd_cfg.exists():
         return cwd_cfg
 
+    template_name = get_os_config_template_filename()
+    if template_name and (Path.cwd() / template_name).is_file():
+        return cwd_cfg
+
     # When launched from another directory (e.g. via run_simple_3d_step.sh), prefer the
     # repository/project root config.json if this is a source checkout.
     project_root = Path(__file__).resolve().parents[2]
     root_cfg = project_root / DEFAULT_CONFIG_FILENAME
-    if (project_root / "pyproject.toml").is_file() and root_cfg.is_file():
+    if (project_root / "pyproject.toml").is_file() and (
+        root_cfg.is_file()
+        or (template_name is not None and (project_root / template_name).is_file())
+    ):
         return root_cfg
 
     return cwd_cfg
+
+
+def ensure_config_file(
+    config_path: Optional[Path] = None,
+    *,
+    platform: Optional[str] = None,
+) -> Optional[Path]:
+    """Copy the OS-specific template (.win / .linux) to config.json when missing.
+
+    Returns the copied template path if bootstrapping occurred, otherwise None.
+    """
+    path = config_path or get_default_config_path()
+    if path.exists():
+        return None
+
+    template_name = get_os_config_template_filename(platform=platform)
+    if not template_name:
+        return None
+
+    suffix = template_name.removeprefix(DEFAULT_CONFIG_FILENAME)
+    candidates = [path.with_name(f"{path.name}{suffix}")]
+    if path.name != DEFAULT_CONFIG_FILENAME:
+        candidates.append(path.parent / template_name)
+
+    for template_path in candidates:
+        if template_path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(template_path, path)
+            return template_path
+
+    return None
 
 
 def default_viewer_label() -> str:
@@ -116,13 +164,19 @@ def resolve_viewer_executable(exe: str) -> Optional[Path]:
     return None
 
 
-def load_config(config_path: Optional[Path] = None) -> AppConfig:
-    """Load AppConfig from JSON file, creating defaults if missing."""
+def load_config(
+    config_path: Optional[Path] = None,
+    *,
+    platform: Optional[str] = None,
+) -> AppConfig:
+    """Load AppConfig from JSON file, copying OS template or creating defaults if missing."""
     path = config_path or get_default_config_path()
     if not path.exists():
-        cfg = AppConfig()
-        save_config(cfg, path)
-        return cfg
+        copied_from = ensure_config_file(path, platform=platform)
+        if copied_from is None:
+            cfg = AppConfig()
+            save_config(cfg, path)
+            return cfg
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))

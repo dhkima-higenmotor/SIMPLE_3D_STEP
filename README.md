@@ -1,6 +1,8 @@
 # SIMPLE 3D STEP
 
 > **Language:** **English** | [한국어 (README_KO.md)](README_KO.md)
+>
+> **Supported Operating Systems:** **Microsoft Windows (64-bit)** · **Linux (64-bit)** (GUI & Headless CLI)
 
 A desktop and CLI tool for simplifying complex 3D STEP assemblies (containing internal motor rotors/stators, gears, bearings, PCBs, fasteners, etc.) into a **single watertight Solid Body STEP file**. It **automatically identifies and removes non-visible internal parts**, **preserves 100% of the original exterior B-Rep CAD geometry** (planes, cylinders, cones, tori, fillets, cooling fins, mounting holes), fills internal cavities with an exact analytic B-Rep core, and purges closed internal void shells for clean cross-section / clipping-plane rendering across CAD kernels.
 
@@ -56,11 +58,20 @@ Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / 
 
 ---
 
-## Requirements & Installation
+## Supported Operating Systems & Requirements
 
-- **OS**: Windows (64-bit) or Linux (64-bit; GUI requires X11/Wayland + `tkinter`)
+### Supported Operating Systems
+
+| Operating System | Architecture | Modes Supported | Launcher Script | Default Config Template |
+| :--- | :---: | :--- | :--- | :--- |
+| **Microsoft Windows** (Windows 10 / 11) | 64-bit (`x86_64`) | Desktop GUI (Single / Batch) & CLI | `run_simple_3d_step.bat` | `config.json.win` |
+| **Linux** (Ubuntu, Fedora, Debian, etc.) | 64-bit (`x86_64`) | Desktop GUI (X11/Wayland + `tkinter`) & Headless CLI | `run_simple_3d_step.sh` | `config.json.linux` |
+
+### Requirements & Installation
+
 - **Python**: 3.13+ (managed with [uv](https://docs.astral.sh/uv/))
 - **Core Libraries**: `cadquery-ocp-novtk` (OCCT 8.x), `trimesh`, `embreex` (Intel Embree), `rtree`, `numpy`, `scipy`, `scikit-image` (2D internal core contour extraction)
+- **Recommended External 3D Viewer (optional, installed separately)**: [OpenCASCADE CAD Assistant](https://opencascade.com/products/cad-assistant/) (`https://opencascade.com/products/cad-assistant/`) — free cross-platform STEP viewer for Windows and Linux built on the OpenCASCADE kernel, ideal for inspecting kept parts and verifying solid cross-sections with clipping planes.
 
 ```bash
 # Sync dependencies
@@ -148,16 +159,22 @@ The GUI has two tabs, switchable at any time from the top of the window (see the
 
 ## External 3D Viewer & GUI Font Configuration (`config.json`)
 
-Configure your preferred external 3D viewer and GUI font (`ui_font_family`, `ui_font_size`) in `config.json` (project root) or via **[Settings]** in the GUI. Leaving `viewer_executable` empty opens STEP files with the system default file association (Windows default application / Linux `xdg-open` / macOS `open`). On Linux, you may specify either an absolute path (e.g. `"/usr/bin/freecad"`) or a command on `PATH` (e.g. `"freecad"`). Font changes apply immediately without restarting; leaving `ui_font_family` empty uses the automatic OS default (`Segoe UI` on Windows, `Noto Sans` / `DejaVu Sans` on Linux).
+> **Automatic OS Default Initialization:** On startup, if `config.json` does not exist yet, the application automatically copies the OS-specific template — `config.json.win` on **Microsoft Windows** or `config.json.linux` on **Linux** — to `config.json` and applies it immediately.
+
+> **Recommended External 3D Viewer:** For viewing original STEP assemblies, kept-part previews, and simplified solid outputs (including cross-section / clipping-plane inspection), we recommend installing **[OpenCASCADE CAD Assistant](https://opencascade.com/products/cad-assistant/)** (`https://opencascade.com/products/cad-assistant/`), which is free and available on both Windows and Linux:
+> - **Windows default path**: `C:/Program Files/CAD Assistant/CADAssistant.exe`
+> - **Linux default path**: `/usr/bin/cadassistant` (or `cadassistant` on `PATH`)
+
+Configure your preferred external 3D viewer and GUI font (`ui_font_family`, `ui_font_size`) in `config.json` (project root) or via **[Settings]** in the GUI. Leaving `viewer_executable` empty opens STEP files with the system default file association (Windows default application / Linux `xdg-open`). On Linux, you may specify either an absolute path (e.g. `"/usr/bin/cadassistant"`) or a command on `PATH` (e.g. `"cadassistant"`). Font changes apply immediately without restarting; leaving `ui_font_family` empty uses the automatic OS default (`Segoe UI` on Windows, `Noto Sans` / `DejaVu Sans` on Linux).
 
 ```json
 {
-  "viewer_executable": "C:\\Program Files\\FreeCAD 1.0\\bin\\freecad.exe",
+  "viewer_executable": "C:/Program Files/CAD Assistant/CADAssistant.exe",
   "viewer_args": "{file}",
   "ui_font_family": "",
   "ui_font_size": 9,
-  "num_views": 64,
-  "grid_resolution": 160,
+  "num_views": 162,
+  "grid_resolution": 200,
   "min_visible_ratio_pct": 0.5,
   "fill_internal_core": true,
   "core_bridge_gap_mm": 3.5,
@@ -181,7 +198,9 @@ Configure your preferred external 3D viewer and GUI font (`ui_font_family`, `ui_
 SIMPLE_3D_STEP/
 ├── README.md                        # English documentation
 ├── README_KO.md                     # Korean documentation
-├── config.json                      # External 3D viewer path and default parameters
+├── config.json                      # Active configuration (auto-copied from .win / .linux if missing)
+├── config.json.win                  # Default configuration template for Microsoft Windows
+├── config.json.linux                # Default configuration template for Linux
 ├── pyproject.toml                   # uv project metadata and dependencies
 ├── run_simple_3d_step.bat           # Windows launcher (Single/Batch tabbed GUI, drag-and-drop, CLI)
 ├── run_simple_3d_step.sh            # Linux/POSIX launcher (auto uv sync, GUI & headless CLI)

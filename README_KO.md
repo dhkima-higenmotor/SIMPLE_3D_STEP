@@ -1,6 +1,8 @@
 # SIMPLE 3D STEP
 
 > **Language:** [English (README.md)](README.md) | **한국어**
+>
+> **지원 운영체제:** **Microsoft Windows (64-bit)** · **Linux (64-bit)** (GUI 및 헤드리스 CLI)
 
 내부 부품(모터 로터·스테이터, 기어, 베어링, PCB, 내부 체결부품 등)까지 모두 포함된 복잡한 3D STEP 어셈블리 파일을 **단일 Watertight Solid Body STEP 파일**로 단순화하는 데스크톱/CLI 도구입니다. **외부에서 보이지 않는 내부 부품을 자동 식별·삭제**하고, **외관 B-Rep CAD 형상(평면·원통·원추·토러스·필렛·방열핀·체결홀 등)을 100% 원본 그대로 보존**한 채 해석적 B-Rep 코어로 내부 빈 공간을 채우고 밀폐 내부 공동(Closed Void Shell)을 완전 제거하여, 다양한 CAD 커널의 단면(Clipping Plane) 뷰에서도 속이 꽉 찬 솔리드로 표시되도록 변환합니다.
 
@@ -56,11 +58,20 @@
 
 ---
 
-## 요구 환경 및 설치
+## 지원 운영체제 및 요구 환경
 
-- **OS**: Windows (64-bit) 또는 Linux (64-bit; GUI 실행 시 X11/Wayland + `tkinter` 필요)
+### 지원 운영체제
+
+| 운영체제 | 아키텍처 | 지원 실행 모드 | 런처 스크립트 | 기본 설정 템플릿 |
+| :--- | :---: | :--- | :--- | :--- |
+| **Microsoft Windows** (Windows 10 / 11) | 64-bit (`x86_64`) | 데스크톱 GUI (Single / Batch) 및 CLI | `run_simple_3d_step.bat` | `config.json.win` |
+| **Linux** (Ubuntu, Fedora, Debian 등) | 64-bit (`x86_64`) | 데스크톱 GUI (X11/Wayland + `tkinter`) 및 헤드리스 CLI | `run_simple_3d_step.sh` | `config.json.linux` |
+
+### 요구 환경 및 설치
+
 - **Python**: 3.13 이상 ([uv](https://docs.astral.sh/uv/) 패키지 매니저 사용)
 - **핵심 라이브러리**: `cadquery-ocp-novtk` (OCCT 8.x), `trimesh`, `embreex` (Intel Embree), `rtree`, `numpy`, `scipy`, `scikit-image` (2D 내부 코어 윤곽 추출용)
+- **권장 외부 3D 뷰어 (별도 설치, 선택 사항)**: [OpenCASCADE CAD Assistant](https://opencascade.com/products/cad-assistant/) (`https://opencascade.com/products/cad-assistant/`) — Windows와 Linux를 모두 지원하는 무료 OpenCASCADE 기반 STEP 뷰어로, 유지 부품 미리보기 및 단면(Clipping Plane) 솔리드 검증에 권장합니다.
 
 ```bash
 # 의존성 동기화
@@ -148,16 +159,22 @@ GUI 상단의 탭으로 언제든 두 가지 모드를 전환할 수 있습니�
 
 ## 외부 3D 뷰어 및 GUI 폰트 설정 (`config.json`)
 
-프로젝트 루트의 `config.json` 또는 GUI 상단의 **[Settings]**에서 외부 3D 뷰어 경로와 GUI 폰트(`ui_font_family`, `ui_font_size`)를 설정할 수 있습니다. `viewer_executable`을 비워 두면 시스템 기본 연결 프로그램(Windows 기본 앱 / Linux `xdg-open` / macOS `open`)으로 STEP 파일을 엽니다. Linux에서는 절대 경로(예: `"/usr/bin/freecad"`)뿐 아니라 `PATH`에 등록된 명령어(예: `"freecad"`)도 그대로 지정할 수 있습니다. GUI 폰트는 저장 즉시 재시작 없이 반영되며, `ui_font_family`를 비워 두면 OS 기본 폰트(Windows `Segoe UI`, Linux `Noto Sans` / `DejaVu Sans` 등)가 자동 선택됩니다.
+> **운영체제별 기본 설정 자동 생성:** 프로그램 시작 시 `config.json` 파일이 존재하지 않으면, **Microsoft Windows**에서는 `config.json.win`, **Linux**에서는 `config.json.linux` 파일을 `config.json`으로 자동 복사한 뒤 즉시 반영합니다.
+
+> **권장 외부 3D 뷰어:** 원본 STEP 어셈블리, 유지 부품 미리보기, 최종 솔리드 변환 결과(단면/클리핑 플레인 확인 포함)를 보기 위해 별도로 설치하는 뷰어로는 Windows와 Linux를 모두 지원하는 무료 뷰어인 **[OpenCASCADE CAD Assistant](https://opencascade.com/products/cad-assistant/)** (`https://opencascade.com/products/cad-assistant/`) 사용을 권장합니다.
+> - **Windows 기본 경로**: `C:/Program Files/CAD Assistant/CADAssistant.exe`
+> - **Linux 기본 경로**: `/usr/bin/cadassistant` (또는 `PATH`에 등록된 `cadassistant`)
+
+프로젝트 루트의 `config.json` 또는 GUI 상단의 **[Settings]**에서 외부 3D 뷰어 경로와 GUI 폰트(`ui_font_family`, `ui_font_size`)를 설정할 수 있습니다. `viewer_executable`을 비워 두면 시스템 기본 연결 프로그램(Windows 기본 앱 / Linux `xdg-open`)으로 STEP 파일을 엽니다. Linux에서는 절대 경로(예: `"/usr/bin/cadassistant"`)뿐 아니라 `PATH`에 등록된 명령어(예: `"cadassistant"`)도 그대로 지정할 수 있습니다. GUI 폰트는 저장 즉시 재시작 없이 반영되며, `ui_font_family`를 비워 두면 OS 기본 폰트(Windows `Segoe UI`, Linux `Noto Sans` / `DejaVu Sans` 등)가 자동 선택됩니다.
 
 ```json
 {
-  "viewer_executable": "C:\\Program Files\\FreeCAD 1.0\\bin\\freecad.exe",
+  "viewer_executable": "C:/Program Files/CAD Assistant/CADAssistant.exe",
   "viewer_args": "{file}",
   "ui_font_family": "",
   "ui_font_size": 9,
-  "num_views": 64,
-  "grid_resolution": 160,
+  "num_views": 162,
+  "grid_resolution": 200,
   "min_visible_ratio_pct": 0.5,
   "fill_internal_core": true,
   "core_bridge_gap_mm": 3.5,
@@ -181,7 +198,9 @@ GUI 상단의 탭으로 언제든 두 가지 모드를 전환할 수 있습니�
 SIMPLE_3D_STEP/
 ├── README.md                        # 영문 문서
 ├── README_KO.md                     # 한국어 문서
-├── config.json                      # 외부 3D 뷰어 경로 및 기본 파라미터 설정
+├── config.json                      # 현재 적용 설정 (미존재 시 .win / .linux에서 자동 복사)
+├── config.json.win                  # Microsoft Windows 기본 설정 템플릿
+├── config.json.linux                # Linux 기본 설정 템플릿
 ├── pyproject.toml                   # uv 프로젝트 메타데이터 및 의존성 정의
 ├── run_simple_3d_step.bat           # Windows 실행 배치 파일 (Single/Batch 탭 GUI, 드래그앤드롭, CLI 겸용)
 ├── run_simple_3d_step.sh            # Linux/POSIX 실행 쉘 스크립트 (자동 uv sync, GUI 및 헤드리스 CLI)

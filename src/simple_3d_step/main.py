@@ -10,7 +10,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from simple_3d_step.config import resolve_batch_workers, threads_per_batch_worker
+from simple_3d_step.config import (
+    ensure_config_file,
+    resolve_batch_workers,
+    threads_per_batch_worker,
+)
 from simple_3d_step.models import SimplifyConfig, VisibilityConfig
 
 
@@ -247,6 +251,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.input = args.step_file[0]
         if not args.input:
             parser.error("CLI mode requires --input or a STEP file path.")
+        ensure_config_file()
         return _run_cli(args)
 
     step_files = [Path(p).resolve() for p in args.step_file]

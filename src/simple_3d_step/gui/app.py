@@ -15,6 +15,7 @@ import numpy as np
 from simple_3d_step.config import (
     AppConfig,
     default_viewer_label,
+    ensure_config_file,
     get_default_config_path,
     launch_external_viewer,
     load_config,
@@ -67,6 +68,7 @@ class Simple3DStepApp(tk.Tk):
         self.minsize(780, 540)
 
         self._config_path = get_default_config_path()
+        bootstrapped_from = ensure_config_file(self._config_path)
         self._config: AppConfig = load_config(self._config_path)
 
         self._start_mode = start_mode if start_mode in ("single", "batch") else "single"
@@ -123,6 +125,10 @@ class Simple3DStepApp(tk.Tk):
 
         viewer_info = self._config.viewer_executable or default_viewer_label()
         active_font = resolve_ui_font_family(self, preferred=self._config.ui_font_family)
+        if bootstrapped_from is not None:
+            self._log_panel.append_log(
+                f"Created {self._config_path.name} from {bootstrapped_from.name}"
+            )
         self._log_panel.append_log(f"Loaded config: {self._config_path}")
         self._log_panel.append_log(
             f"External 3D viewer: {viewer_info} · UI Font: {active_font} {self._config.ui_font_size}pt"
