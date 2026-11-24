@@ -1,4 +1,4 @@
-"""Bottom Modern Flat status bar, progress indicator, and slate log console."""
+"""Bottom status bar, progress indicator, and light Output Log matching AUTO_RENDER."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 
 
 class LogPanel(tk.Frame):
-    """Displays live operation status, slim progress bar, cancel button, and log console."""
+    """Displays live operation status, slim progress bar, cancel button, and Output Log."""
 
     def __init__(
         self,
@@ -23,9 +23,7 @@ class LogPanel(tk.Frame):
     ) -> None:
         super().__init__(
             parent,
-            background=COLORS["surface"],
-            highlightbackground=COLORS["border"],
-            highlightthickness=1,
+            background=COLORS["bg_light"],
         )
         self._on_cancel = on_cancel
         self._status_var = tk.StringVar(value="Ready — click [Open STEP] to load an assembly.")
@@ -38,32 +36,35 @@ class LogPanel(tk.Frame):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        status_row = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 5))
-        status_row.pack(fill=tk.X)
+        frame_log = ttk.LabelFrame(self, text="Output Log", padding=(6, 3))
+        frame_log.pack(fill=tk.BOTH, expand=True)
+
+        status_row = ttk.Frame(frame_log, style="Card.TFrame")
+        status_row.pack(fill=tk.X, pady=(0, 3))
 
         ttk.Label(
             status_row,
             textvariable=self._status_var,
-            style="Subtle.TLabel",
-            font=FONTS["small_bold"],
+            style="CardBold.TLabel",
+            foreground=COLORS["fg_sub"],
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self._progress = ttk.Progressbar(
             status_row,
             variable=self._progress_var,
             maximum=100.0,
-            length=210,
+            length=160,
             mode="determinate",
         )
-        self._progress.pack(side=tk.LEFT, padx=(10, 8))
+        self._progress.pack(side=tk.LEFT, padx=(8, 6))
 
         self._cancel_btn = ttk.Button(
             status_row,
             text="Cancel",
-            style="Small.TButton",
+            style="Danger.TButton",
             command=self._handle_cancel,
             state=tk.DISABLED,
-            width=9,
+            width=8,
         )
         self._cancel_btn.pack(side=tk.LEFT, padx=(0, 4))
 
@@ -72,31 +73,36 @@ class LogPanel(tk.Frame):
             text="Clear Log",
             style="Small.TButton",
             command=self.clear_log,
-            width=10,
+            width=9,
         ).pack(side=tk.LEFT)
 
-        # Hairline divider between status strip and console
-        tk.Frame(self, height=1, background=COLORS["border"]).pack(fill=tk.X)
-
-        log_frame = tk.Frame(self, background=COLORS["console_bg"], padx=6, pady=4)
-        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_inner = ttk.Frame(frame_log, style="Card.TFrame")
+        log_inner.pack(fill=tk.BOTH, expand=True)
 
         self._text = tk.Text(
-            log_frame,
-            height=4,
+            log_inner,
+            height=3,
             wrap=tk.WORD,
             state=tk.DISABLED,
             font=FONTS["mono"],
-            background=COLORS["console_bg"],
-            foreground=COLORS["console_fg"],
-            insertbackground="#ffffff",
-            selectbackground="#334155",
+            background=COLORS["bg_dark"],
+            foreground=COLORS["fg"],
+            insertbackground=COLORS["fg"],
+            selectbackground=COLORS["accent"],
+            selectforeground="#ffffff",
             relief=tk.FLAT,
             borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
             padx=4,
             pady=2,
         )
-        scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._text.yview)
+        self._text.tag_config("error", foreground=COLORS["red"])
+        self._text.tag_config("ok", foreground=COLORS["green_dim"])
+        self._text.tag_config("accent", foreground=COLORS["accent"])
+
+        scroll = ttk.Scrollbar(log_inner, orient=tk.VERTICAL, command=self._text.yview)
         self._text.configure(yscrollcommand=scroll.set)
 
         self._text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -141,8 +147,20 @@ class LogPanel(tk.Frame):
 
     def append_log(self, message: str) -> None:
         ts = datetime.datetime.now().strftime("%H:%M:%S")
+        tag = None
+        stripped = message.lstrip()
+        if stripped.startswith(("✖", "■")):
+            tag = "error"
+        elif stripped.startswith("✔"):
+            tag = "ok"
+        elif stripped.startswith("▶"):
+            tag = "accent"
+
         self._text.configure(state=tk.NORMAL)
-        self._text.insert(tk.END, f"[{ts}] {message}\n")
+        if tag:
+            self._text.insert(tk.END, f"[{ts}] {message}\n", tag)
+        else:
+            self._text.insert(tk.END, f"[{ts}] {message}\n")
         self._text.see(tk.END)
         self._text.configure(state=tk.DISABLED)
 

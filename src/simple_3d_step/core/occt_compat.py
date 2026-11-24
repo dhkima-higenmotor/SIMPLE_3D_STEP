@@ -18,6 +18,7 @@ from OCP.TopoDS import (
     TopoDS_Shape,
     TopoDS_Shell,
     TopoDS_Solid,
+    TopoDS_Vertex,
     TopoDS_Wire,
 )
 
@@ -149,6 +150,11 @@ def to_wire(shape: TopoDS_Shape) -> TopoDS_Wire:
     return fn(shape)
 
 
+def to_vertex(shape: TopoDS_Shape) -> TopoDS_Vertex:
+    fn = getattr(TopoDS, "Vertex", None) or getattr(TopoDS, "Vertex_s")
+    return fn(shape)
+
+
 __all__ = [
     "LabelSequence",
     "ShapeHSequence",
@@ -165,5 +171,6 @@ __all__ = [
     "to_face",
     "to_shell",
     "to_solid",
+    "to_vertex",
     "to_wire",
 ]

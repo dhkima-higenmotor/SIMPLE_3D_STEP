@@ -63,18 +63,16 @@ class ControlPanel(tk.Frame):
 
     def _build_ui(self) -> None:
         # Card header strip
-        header = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 7))
+        header = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 6))
         header.pack(fill=tk.X)
         ttk.Label(
             header,
             text="Advanced Parameters",
-            style="Subtle.TLabel",
-            foreground=COLORS["text"],
-            font=FONTS["small_bold"],
+            style="SectionTitle.TLabel",
         ).pack(side=tk.LEFT)
         tk.Frame(self, height=1, background=COLORS["border"]).pack(fill=tk.X)
 
-        # Vertically scrollable white canvas prevents clipping on large system fonts
+        # Vertically scrollable canvas prevents clipping when window is short
         scroll_wrap = tk.Frame(self, background=COLORS["surface"])
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
 
@@ -83,7 +81,7 @@ class ControlPanel(tk.Frame):
             background=COLORS["surface"],
             highlightthickness=0,
             borderwidth=0,
-            width=430,
+            width=390,
         )
         self._vscroll = ttk.Scrollbar(scroll_wrap, orient=tk.VERTICAL, command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=self._vscroll.set)
@@ -123,15 +121,15 @@ class ControlPanel(tk.Frame):
         preset_frame = ttk.Frame(tab1, style="Card.TFrame")
         preset_frame.grid(row=row, column=1, sticky=tk.EW, pady=3)
         ttk.Button(
-            preset_frame, text="Fast(26)", style="Small.TButton", width=8,
+            preset_frame, text="Fast(26)", style="Small.TButton", width=7,
             command=lambda: self._apply_vis_preset(26, 112),
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        ).pack(side=tk.LEFT, padx=(0, 3))
         ttk.Button(
-            preset_frame, text="Std(64)", style="Small.TButton", width=8,
+            preset_frame, text="Std(64)", style="Small.TButton", width=7,
             command=lambda: self._apply_vis_preset(64, 160),
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        ).pack(side=tk.LEFT, padx=(0, 3))
         ttk.Button(
-            preset_frame, text="Fine(162)", style="Small.TButton", width=9,
+            preset_frame, text="Fine(162)", style="Small.TButton", width=8,
             command=lambda: self._apply_vis_preset(162, 200),
         ).pack(side=tk.LEFT)
 
@@ -188,8 +186,8 @@ class ControlPanel(tk.Frame):
             tab2,
             text="Preserves all original exterior B-Rep surfaces and fills only internal voids.",
             style="Muted.TLabel",
-            foreground=COLORS["accent_text"],
-            wraplength=390,
+            foreground=COLORS["accent"],
+            wraplength=340,
         ).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=(0, 6))
 
         r += 1
@@ -282,7 +280,7 @@ class ControlPanel(tk.Frame):
             textvariable=self._result_var,
             style="Card.TLabel",
             justify=tk.LEFT,
-            wraplength=390,
+            wraplength=340,
         ).pack(fill=tk.X, anchor=tk.NW)
 
         btn_row = ttk.Frame(res_card, style="Card.TFrame", padding=(0, 8, 0, 0))

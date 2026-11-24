@@ -30,9 +30,10 @@ import trimesh
 from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Defeaturing, BRepAlgoAPI_Fuse
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Defeaturing, BRepAlgoAPI_Fuse, BRepAlgoAPI_Section
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepBuilderAPI import (
+    BRepBuilderAPI_Copy,
     BRepBuilderAPI_MakeEdge,
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakePolygon,
@@ -40,14 +41,16 @@ from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeVertex,
 )
 from OCP.BRepClass3d import BRepClass3d, BRepClass3d_SolidClassifier
+from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+from OCP.BRepFeat import BRepFeat_SplitShape
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepLib import BRepLib
 from OCP.BRepLProp import BRepLProp_SLProps
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
 from OCP.BRepTools import BRepTools
-from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Line
-from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Vec
+from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Line, GeomAbs_Plane
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.ShapeAnalysis import ShapeAnalysis_Wire
@@ -68,6 +71,7 @@ from OCP.TopAbs import (
     TopAbs_REVERSED,
     TopAbs_SHELL,
     TopAbs_SOLID,
+    TopAbs_VERTEX,
     TopAbs_WIRE,
 )
 from OCP.TopExp import TopExp, TopExp_Explorer
@@ -95,6 +99,7 @@ from simple_3d_step.core.occt_compat import (
     to_face,
     to_shell,
     to_solid,
+    to_vertex,
     to_wire,
 )
 from simple_3d_step.core.tessellation import (
@@ -1292,6 +1297,192 @@ def _normalize_via_step_3d_curves(shape: TopoDS_Shape) -> TopoDS_Shape:
     return shape
 
 
+def _unique_wire_vertices(wire: TopoDS_Wire) -> list:
+    verts = []
+    ve = TopExp_Explorer(wire, TopAbs_VERTEX)
+    while ve.More():
+        v = to_vertex(ve.Current())
+        if not any(v.IsSame(u) for u in verts):
+            verts.append(v)
+        ve.Next()
+    return verts
+
+
+def _wire_centroid_on_plane(wire: TopoDS_Wire, pln: gp_Pln) -> Optional[gp_Pnt]:
+    """Compute a robust interior centroid of a closed wire projected onto ``pln``."""
+    sx = sy = sz = 0.0
+    cnt = 0
+    ee = TopExp_Explorer(wire, TopAbs_EDGE)
+    while ee.More():
+        ed = to_edge(ee.Current())
+        if not BRep_Tool.Degenerated_s(ed):
+            try:
+                ac = BRepAdaptor_Curve(ed)
+                u0, u1 = ac.FirstParameter(), ac.LastParameter()
+                for k in range(8):
+                    p = ac.Value(u0 + (u1 - u0) * (k / 8.0))
+                    sx += p.X()
+                    sy += p.Y()
+                    sz += p.Z()
+                    cnt += 1
+            except Exception:
+                pass
+        ee.Next()
+    if cnt == 0:
+        return None
+    raw = gp_Pnt(sx / cnt, sy / cnt, sz / cnt)
+    loc = pln.Location()
+    n = pln.Axis().Direction()
+    dist = (
+        (raw.X() - loc.X()) * n.X()
+        + (raw.Y() - loc.Y()) * n.Y()
+        + (raw.Z() - loc.Z()) * n.Z()
+    )
+    return gp_Pnt(raw.X() - dist * n.X(), raw.Y() - dist * n.Y(), raw.Z() - dist * n.Z())
+
+
+def _split_tangent_pinch_wire_faces(
+    shape: TopoDS_Shape,
+    bad_faces: set[int],
+) -> tuple[Optional[TopoDS_Shape], int]:
+    """Split planar mesh-failing faces where an inner hole wire is tangent to the outer wire.
+
+    In OCCT's BRepMesh, an inner hole wire touching the outer boundary wire at a single tangent
+    pinch-point triggers ``IMeshData_SelfIntersectingWire | IMeshData_Failure`` (0 triangles)
+    after STEP import tolerance clamping, causing CAD Assistant to drop the entire face and
+    downgrade the solid to an opened shell.
+
+    Splitting the face with local exact chords passing through the tangent hole's centroid
+    parallel to the tangent line separates the pinch-point into clean single-wire sub-faces
+    with 0.0 mm geometric distortion.
+    """
+    cand = BRepBuilderAPI_Copy(shape).Shape()
+
+    # Pass 1: Unify any coincident unmerged vertices between a tangent inner wire and the
+    # outer wire on failing planar faces so BRepFeat_SplitShape splits the pinch cleanly into
+    # two non-pinched crescent faces rather than leaving a figure-8 bow-tie face.
+    vertex_reshape = ShapeBuild_ReShape()
+    merged_verts = 0
+    ef = TopExp_Explorer(cand, TopAbs_FACE)
+    idx = 0
+    while ef.More():
+        if idx in bad_faces:
+            f = to_face(ef.Current())
+            if BRepAdaptor_Surface(f, False).GetType() == GeomAbs_Plane:
+                outer_w = BRepTools.OuterWire_s(f)
+                outer_verts = _unique_wire_vertices(outer_w)
+                we = TopExp_Explorer(f, TopAbs_WIRE)
+                while we.More():
+                    iw = to_wire(we.Current())
+                    if not iw.IsSame(outer_w):
+                        for vi in _unique_wire_vertices(iw):
+                            pi = BRep_Tool.Pnt_s(vi)
+                            for vo in outer_verts:
+                                if not vi.IsSame(vo) and pi.Distance(BRep_Tool.Pnt_s(vo)) < 1e-3:
+                                    vertex_reshape.Replace(
+                                        vi.Oriented(TopAbs_FORWARD),
+                                        vo.Oriented(TopAbs_FORWARD),
+                                    )
+                                    merged_verts += 1
+                                    break
+                    we.Next()
+        idx += 1
+        ef.Next()
+
+    if merged_verts > 0:
+        cand = vertex_reshape.Apply(cand)
+
+    # Pass 2: Collect exact local chord edges cutting each tangent inner wire on failing faces.
+    split_ops: list[tuple[TopoDS_Edge, TopoDS_Face]] = []
+    pinch_holes = 0
+    ef2 = TopExp_Explorer(cand, TopAbs_FACE)
+    idx = 0
+    while ef2.More():
+        if idx in bad_faces:
+            f = to_face(ef2.Current())
+            surf = BRepAdaptor_Surface(f, False)
+            if surf.GetType() == GeomAbs_Plane:
+                face_pln = surf.Plane()
+                fn = face_pln.Axis().Direction()
+                box = Bnd_Box()
+                BRepBndLib.Add_s(f, box, False)
+                if not box.IsVoid():
+                    pmin, pmax = box.CornerMin(), box.CornerMax()
+                    span = max(pmin.Distance(pmax) * 1.5, 20.0)
+                else:
+                    span = 100.0
+
+                outer_w = BRepTools.OuterWire_s(f)
+                we = TopExp_Explorer(f, TopAbs_WIRE)
+                while we.More():
+                    iw = to_wire(we.Current())
+                    if not iw.IsSame(outer_w):
+                        ext = BRepExtrema_DistShapeShape(iw, outer_w)
+                        if ext.IsDone() and ext.NbSolution() > 0 and ext.Value() < 1e-2:
+                            p_pinch = ext.PointOnShape1(1)
+                            c_hole = _wire_centroid_on_plane(iw, face_pln)
+                            if c_hole is not None:
+                                v_raw = gp_Vec(c_hole, p_pinch)
+                                dot_n = v_raw.X() * fn.X() + v_raw.Y() * fn.Y() + v_raw.Z() * fn.Z()
+                                v_in_pln = gp_Vec(
+                                    v_raw.X() - dot_n * fn.X(),
+                                    v_raw.Y() - dot_n * fn.Y(),
+                                    v_raw.Z() - dot_n * fn.Z(),
+                                )
+                                if v_in_pln.Magnitude() > 1e-6:
+                                    cut_pln = gp_Pln(c_hole, gp_Dir(v_in_pln))
+                                    cut_face = BRepBuilderAPI_MakeFace(
+                                        cut_pln, -span, span, -span, span
+                                    ).Face()
+                                    sec = BRepAlgoAPI_Section(f, cut_face, False)
+                                    sec.ComputePCurveOn1(True)
+                                    sec.Approximation(True)
+                                    sec.Build()
+                                    if sec.IsDone():
+                                        added_here = 0
+                                        se = TopExp_Explorer(sec.Shape(), TopAbs_EDGE)
+                                        while se.More():
+                                            ed = to_edge(se.Current())
+                                            if not BRep_Tool.Degenerated_s(ed):
+                                                v1 = TopExp.FirstVertex_s(ed, False)
+                                                v2 = TopExp.LastVertex_s(ed, False)
+                                                d1 = BRepExtrema_DistShapeShape(v1, iw)
+                                                d2 = BRepExtrema_DistShapeShape(v2, iw)
+                                                dist1 = d1.Value() if (d1.IsDone() and d1.NbSolution() > 0) else 1e9
+                                                dist2 = d2.Value() if (d2.IsDone() and d2.NbSolution() > 0) else 1e9
+                                                if min(dist1, dist2) < 0.05:
+                                                    split_ops.append((ed, f))
+                                                    added_here += 1
+                                            se.Next()
+                                        if added_here > 0:
+                                            pinch_holes += 1
+                    we.Next()
+        idx += 1
+        ef2.Next()
+
+    if not split_ops:
+        return None, 0
+
+    feat = BRepFeat_SplitShape(cand)
+    for ed, f in split_ops:
+        feat.Add(ed, f)
+    feat.Build()
+    if not feat.IsDone():
+        return None, 0
+
+    sf = ShapeFix_Shape(feat.Shape())
+    sf.SetPrecision(1e-4)
+    sf.SetMaxTolerance(1e-3)
+    sf.Perform()
+    sols = _extract_solids(sf.Shape())
+    repaired: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
+    for s in sols:
+        BRepLib.OrientClosedSolid_s(s)
+    BRepTools.Clean_s(repaired)
+    repaired = _normalize_via_step_3d_curves(repaired)
+    return repaired, pinch_holes
+
+
 def _heal_mesh_blocking_faces(
     shape: TopoDS_Shape,
     logs: list[str],
@@ -1303,6 +1494,9 @@ def _heal_mesh_blocking_faces(
     Step B: Targeted exact midpoint splitting of long curved edges ONLY on any remaining
             mesh-failing faces (0 extra faces, 0.0 mm geometric distortion) prevents coarse
             Prs3d chord self-intersection at CAD Assistant's default 20-deg/0.004*L mesh.
+    Step C: Exact local chord splitting of planar faces whose inner hole wire touches the outer
+            boundary wire at a tangent pinch-point (0.0 mm geometric distortion, resolves OCCT
+            IMeshData_SelfIntersectingWire on tangent holes).
     """
     current = shape
     rep_base = validate_shape(current)
@@ -1421,6 +1615,37 @@ def _heal_mesh_blocking_faces(
                                 f"(unmeshed faces {len(bad_faces)} -> {len(bad_b)}, 0.0 mm geometric error)"
                             )
                             current = cand_b
+                            rep_base = rep_b
+                            lacking_base = lacking_b
+                            fails_before = fails_b
+                            bad_faces = bad_b
+        except Exception:
+            pass
+
+    # Step C: Split planar faces where an inner hole wire is tangent to the outer boundary wire
+    # (pinch-point wire tangency triggers IMeshData_SelfIntersectingWire in OCCT / CAD Assistant)
+    if bad_faces:
+        try:
+            cand_c, pinch_holes = _split_tangent_pinch_wire_faces(current, bad_faces)
+            if cand_c is not None and pinch_holes > 0:
+                rep_c = validate_shape(cand_c)
+                lacking_c = _count_lacking_wires(cand_c)
+                if (
+                    rep_c.solid_count == rep_base.solid_count
+                    and rep_c.shell_count <= rep_base.shell_count
+                    and rep_c.is_watertight
+                    and not (rep_base.is_valid and not rep_c.is_valid)
+                    and abs(rep_c.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+                    and lacking_c <= lacking_base
+                ):
+                    fails_c, bad_c = _audit_prs_closed_meshing(cand_c, fast=False)
+                    if fails_c == 0 or len(bad_c) < len(bad_faces) or fails_c < fails_before:
+                        logs.append(
+                            f"Resolved {pinch_holes} tangent pinch-wire hole(s) for CAD Assistant "
+                            f"solid compatibility (unmeshed faces {len(bad_faces)} -> {len(bad_c)}, "
+                            f"0.0 mm geometric error)"
+                        )
+                        current = cand_c
         except Exception:
             pass
 

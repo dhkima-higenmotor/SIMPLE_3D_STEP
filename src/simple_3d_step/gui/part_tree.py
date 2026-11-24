@@ -40,7 +40,7 @@ class PartTreePanel(tk.Frame):
 
     def _build_ui(self) -> None:
         # Clean top filter & quick-action header strip
-        top_bar = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 7))
+        top_bar = ttk.Frame(self, style="Subtle.TFrame", padding=(8, 4))
         top_bar.pack(fill=tk.X)
 
         ttk.Label(top_bar, text="Search", style="Subtle.TLabel", font=FONTS["small_bold"]).pack(
@@ -94,25 +94,26 @@ class PartTreePanel(tk.Frame):
             columns=self.COLUMNS,
             show="headings",
             selectmode="extended",
+            height=6,
         )
 
         headings = {
-            "keep": ("Keep", 68, tk.CENTER),
-            "id": ("#", 58, tk.E),
-            "name": ("Part Name", 260, tk.W),
-            "visibility": ("Visibility (%)", 130, tk.E),
-            "volume": ("Volume (mm³)", 140, tk.E),
-            "faces": ("Faces", 82, tk.E),
-            "status": ("Status", 145, tk.CENTER),
-            "path": ("Assembly Path", 300, tk.W),
+            "keep": ("Keep", 52, tk.CENTER),
+            "id": ("#", 36, tk.E),
+            "name": ("Part Name", 150, tk.W),
+            "visibility": ("Visibility (%)", 92, tk.E),
+            "volume": ("Volume (mm³)", 105, tk.E),
+            "faces": ("Faces", 58, tk.E),
+            "status": ("Status", 100, tk.CENTER),
+            "path": ("Assembly Path", 167, tk.W),
         }
 
         for col, (label, width, anchor) in headings.items():
             self._tree.heading(col, text=label, command=lambda c=col: self._sort_by(c))
             self._tree.column(col, width=width, minwidth=40, anchor=anchor)
 
-        self._tree.tag_configure("keep_ext", foreground=COLORS["text"], background=COLORS["surface"])
-        self._tree.tag_configure("keep_ext_alt", foreground=COLORS["text"], background="#fafbfd")
+        self._tree.tag_configure("keep_ext", foreground=COLORS["fg"], background=COLORS["bg_dark"])
+        self._tree.tag_configure("keep_ext_alt", foreground=COLORS["fg"], background=COLORS["bg_light"])
         self._tree.tag_configure(
             "drop_int", foreground=COLORS["danger_text"], background=COLORS["danger_soft"]
         )
@@ -138,7 +139,7 @@ class PartTreePanel(tk.Frame):
 
         # Hairline divider + bottom summary strip
         tk.Frame(self, height=1, background=COLORS["border"]).pack(fill=tk.X)
-        summary_frame = ttk.Frame(self, style="Subtle.TFrame", padding=(10, 6))
+        summary_frame = ttk.Frame(self, style="Subtle.TFrame", padding=(8, 4))
         summary_frame.pack(fill=tk.X)
         ttk.Label(
             summary_frame,

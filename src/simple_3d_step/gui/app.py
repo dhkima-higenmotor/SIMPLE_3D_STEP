@@ -44,13 +44,13 @@ class Simple3DStepApp(tk.Tk):
         self._set_window_icon()
         self.title(BASE_TITLE)
 
-        # Compact default window size (smaller than before) while preventing any clipping
+        # Compact, high-density default window size sized cleanly to fit toolbars without overlap
         scr_w = self.winfo_screenwidth()
         scr_h = self.winfo_screenheight()
-        win_w = min(1140, max(980, scr_w - 100))
-        win_h = min(760, max(660, scr_h - 120))
+        win_w = min(800, max(780, scr_w - 100))
+        win_h = min(590, max(540, scr_h - 120))
         self.geometry(f"{win_w}x{win_h}")
-        self.minsize(960, 640)
+        self.minsize(780, 540)
 
         self._config_path = get_default_config_path()
         self._config: AppConfig = load_config(self._config_path)
@@ -203,8 +203,8 @@ class Simple3DStepApp(tk.Tk):
             relief=tk.FLAT,
             borderwidth=0,
             highlightthickness=0,
-            padx=11,
-            pady=5,
+            padx=10,
+            pady=4,
             cursor="hand2",
             disabledforeground=COLORS["text_muted"],
             font=FONTS["base_bold"],
@@ -239,6 +239,7 @@ class Simple3DStepApp(tk.Tk):
             text=f"{spec['prefix']}{base_label}",
             background=spec["bg"],
             foreground=spec["fg"],
+            disabledforeground=spec.get("disabled_fg", COLORS["text_muted"]),
             activebackground=spec["hover_bg"],
             activeforeground=spec["fg"],
             font=spec["font"],
@@ -269,7 +270,7 @@ class Simple3DStepApp(tk.Tk):
 
         # Row 1: Primary 4-step workflow buttons
         self._toolbar_row1 = tk.Frame(header_card, background=COLORS["surface"])
-        self._toolbar_row1.pack(fill=tk.X, padx=10, pady=(7, 4))
+        self._toolbar_row1.pack(fill=tk.X, padx=8, pady=(5, 3))
 
         def _add_chevron() -> None:
             tk.Label(
@@ -277,7 +278,7 @@ class Simple3DStepApp(tk.Tk):
                 text="›",
                 background=COLORS["surface"],
                 foreground=COLORS["text_muted"],
-                font=("Segoe UI", 16),
+                font=("Segoe UI", 11),
                 padx=4,
             ).pack(side=tk.LEFT)
 
@@ -306,7 +307,7 @@ class Simple3DStepApp(tk.Tk):
 
         # Row 2: External 3D viewer actions (left) + [Parameters] toggle & [Viewer Settings] (right)
         self._toolbar_row2 = tk.Frame(header_card, background=COLORS["surface"])
-        self._toolbar_row2.pack(fill=tk.X, padx=10, pady=(2, 7))
+        self._toolbar_row2.pack(fill=tk.X, padx=8, pady=(1, 5))
 
         self._tb_view_orig = ttk.Button(
             self._toolbar_row2, text="Open Original", style="Toolbar.TButton", command=self._on_view_original
@@ -343,13 +344,13 @@ class Simple3DStepApp(tk.Tk):
         self._file_var = tk.StringVar(value="No file loaded — click [Open STEP] above to select a file.")
         self._result_badge_var = tk.StringVar(value="")
 
-        self._info_bar = tk.Frame(self._single_tab, background=COLORS["surface_alt"], padx=12, pady=5)
+        self._info_bar = tk.Frame(self._single_tab, background=COLORS["surface_alt"], padx=8, pady=3)
         self._info_bar.pack(side=tk.TOP, fill=tk.X)
         tk.Label(
             self._info_bar,
             textvariable=self._file_var,
             background=COLORS["surface_alt"],
-            foreground=COLORS["text_secondary"],
+            foreground=COLORS["accent"],
             font=FONTS["small_bold"],
         ).pack(side=tk.LEFT)
 
@@ -368,7 +369,7 @@ class Simple3DStepApp(tk.Tk):
 
         # 3. Bottom Log & Progress drawer — packed BEFORE main_pane so it is NEVER clipped
         self._log_panel = LogPanel(self._single_tab, on_cancel=self._on_cancel_task)
-        self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
+        self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(3, 6))
 
         # Dynamic animated busy banner (packed above main_pane only while busy)
         self._busy_banner = BusyBanner(
@@ -379,7 +380,7 @@ class Simple3DStepApp(tk.Tk):
 
         # 4. Main PanedWindow packed LAST with expand=True so it absorbs all remaining space
         self._main_pane = ttk.PanedWindow(self._single_tab, orient=tk.HORIZONTAL)
-        self._main_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 4))
+        self._main_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(5, 3))
 
         self._part_tree = PartTreePanel(
             self._main_pane, on_selection_changed=self._on_part_selection_modified
@@ -402,6 +403,10 @@ class Simple3DStepApp(tk.Tk):
         ctrl_id = str(self._control_panel)
         if show and ctrl_id not in panes:
             self._main_pane.add(self._control_panel, weight=1)
+            self.update_idletasks()
+            pane_w = self._main_pane.winfo_width()
+            if pane_w > 640:
+                self._main_pane.sashpos(0, max(380, pane_w - 405))
         elif not show and ctrl_id in panes:
             self._main_pane.forget(self._control_panel)
 
@@ -440,7 +445,7 @@ class Simple3DStepApp(tk.Tk):
         self._busy_banner.start(task_name)
         if not self._busy_banner.winfo_ismapped():
             self._busy_banner.pack(
-                side=tk.TOP, fill=tk.X, padx=10, pady=(8, 0), before=self._main_pane
+                side=tk.TOP, fill=tk.X, padx=8, pady=(5, 0), before=self._main_pane
             )
 
     def _hide_busy_banner(self) -> None:

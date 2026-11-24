@@ -188,12 +188,12 @@ class BatchPanel(tk.Frame):
         header.pack(side=tk.TOP, fill=tk.X)
 
         title_row = tk.Frame(header, background=COLORS["surface"])
-        title_row.pack(fill=tk.X, padx=12, pady=(8, 0))
+        title_row.pack(fill=tk.X, padx=8, pady=(5, 0))
         tk.Label(
             title_row,
             text="Batch STEP Simplifier",
             background=COLORS["surface"],
-            foreground=COLORS["text"],
+            foreground=COLORS["accent"],
             font=FONTS["heading"],
         ).pack(side=tk.LEFT)
 
@@ -209,29 +209,26 @@ class BatchPanel(tk.Frame):
         tk.Label(
             header,
             text=(
-                "Add several .step / .stp files, then press [RUN].\n"
-                "Each file is simplified sequentially using config.json; "
-                "<name>_simplified.step is saved next to it.\n"
-                "Tip: highlight rows to run only those files — with no selection the whole queue runs.\n"
-                "Double-click a completed row to open its <name>_simplified.step in the configured 3D viewer."
+                "Add .step / .stp files and press [RUN] — each file is simplified using config.json (<name>_simplified.step).\n"
+                "Tip: highlight rows to run a subset (none = all). Double-click a completed row to open it in the 3D viewer."
             ),
             background=COLORS["surface"],
             foreground=COLORS["text_secondary"],
             font=FONTS["small"],
             anchor=tk.W,
             justify=tk.LEFT,
-        ).pack(fill=tk.X, padx=12, pady=(2, 6))
+        ).pack(fill=tk.X, padx=8, pady=(2, 4))
 
         toolbar = tk.Frame(header, background=COLORS["surface"])
-        toolbar.pack(fill=tk.X, padx=12, pady=(0, 8))
+        toolbar.pack(fill=tk.X, padx=8, pady=(0, 5))
 
         self._btn_add = ttk.Button(
             toolbar,
             text="Add STEP Files...",
-            style="Toolbar.TButton",
+            style="Info.TButton",
             command=self.add_files_dialog,
         )
-        self._btn_add.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_add.pack(side=tk.LEFT, padx=(0, 4))
 
         self._btn_remove = ttk.Button(
             toolbar,
@@ -239,12 +236,12 @@ class BatchPanel(tk.Frame):
             style="Toolbar.TButton",
             command=self._on_remove_selected,
         )
-        self._btn_remove.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_remove.pack(side=tk.LEFT, padx=(0, 4))
 
         self._btn_clear = ttk.Button(
             toolbar, text="Clear List", style="Toolbar.TButton", command=self._on_clear_list
         )
-        self._btn_clear.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_clear.pack(side=tk.LEFT, padx=(0, 4))
 
         self._btn_reload = ttk.Button(
             toolbar,
@@ -256,19 +253,19 @@ class BatchPanel(tk.Frame):
 
         # Primary actions on the right: [Force Stop] [Stop] [RUN]
         self._btn_run = ttk.Button(
-            toolbar, text="RUN", style="Primary.TButton", command=self.run, width=14
+            toolbar, text="RUN", style="Info.TButton", command=self.run, width=10
         )
-        self._btn_run.pack(side=tk.RIGHT, padx=(6, 0))
+        self._btn_run.pack(side=tk.RIGHT, padx=(4, 0))
 
         self._btn_stop = ttk.Button(
-            toolbar, text="Stop", style="Danger.TButton", command=self.stop, width=9
+            toolbar, text="Stop", style="Danger.TButton", command=self.stop, width=7
         )
-        self._btn_stop.pack(side=tk.RIGHT, padx=(6, 0))
+        self._btn_stop.pack(side=tk.RIGHT, padx=(4, 0))
 
         self._btn_force_stop = ttk.Button(
             toolbar,
             text="Force Stop",
-            style="Small.TButton",
+            style="Danger.TButton",
             command=self._on_force_stop,
         )
         self._btn_force_stop.pack(side=tk.RIGHT)
@@ -276,7 +273,7 @@ class BatchPanel(tk.Frame):
         tk.Frame(header, height=1, background=COLORS["border"]).pack(fill=tk.X)
 
         # Parameter strip — read-only view of the values that RUN will use
-        params_strip = tk.Frame(self, background=COLORS["surface_alt"], padx=12, pady=5)
+        params_strip = tk.Frame(self, background=COLORS["surface_alt"], padx=8, pady=3)
         params_strip.pack(side=tk.TOP, fill=tk.X)
 
         self._param_var1 = tk.StringVar(value="")
@@ -304,24 +301,24 @@ class BatchPanel(tk.Frame):
 
         # Bottom log drawer is packed BEFORE the queue table so it is never clipped
         self._log_panel = LogPanel(self, on_cancel=self.stop)
-        self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
+        self._log_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(3, 6))
 
-        self._files_box = ttk.LabelFrame(self, text="Queued STEP Files", padding=6)
-        self._files_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(8, 4))
+        self._files_box = ttk.LabelFrame(self, text="Queued STEP Files", padding=(6, 4))
+        self._files_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(5, 3))
 
         columns = ("name", "folder", "status", "output")
         headings = {
-            "name": ("STEP File", 230, False),
-            "folder": ("Source Folder", 470, True),
-            "status": ("Status", 100, False),
-            "output": ("Output File", 270, True),
+            "name": ("STEP File", 170, False),
+            "folder": ("Source Folder", 310, True),
+            "status": ("Status", 75, False),
+            "output": ("Output File", 185, True),
         }
         self._tree = ttk.Treeview(
-            self._files_box, columns=columns, show="headings", selectmode="extended"
+            self._files_box, columns=columns, show="headings", selectmode="extended", height=5
         )
         for col, (text, width, stretch) in headings.items():
             self._tree.heading(col, text=text)
-            self._tree.column(col, width=width, minwidth=80, stretch=stretch, anchor=tk.W)
+            self._tree.column(col, width=width, minwidth=70, stretch=stretch, anchor=tk.W)
 
         yscroll = ttk.Scrollbar(self._files_box, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=yscroll.set)
@@ -330,10 +327,18 @@ class BatchPanel(tk.Frame):
         self._files_box.rowconfigure(0, weight=1)
         self._files_box.columnconfigure(0, weight=1)
 
-        self._tree.tag_configure("done", background=COLORS["success_soft"])
-        self._tree.tag_configure("failed", background=COLORS["danger_soft"])
-        self._tree.tag_configure("running", background=COLORS["accent_soft"])
-        self._tree.tag_configure("skipped", background=COLORS["warning_soft"])
+        self._tree.tag_configure(
+            "done", background=COLORS["success_soft"], foreground=COLORS["success_text"]
+        )
+        self._tree.tag_configure(
+            "failed", background=COLORS["danger_soft"], foreground=COLORS["danger_text"]
+        )
+        self._tree.tag_configure(
+            "running", background=COLORS["accent_soft"], foreground=COLORS["accent_text"]
+        )
+        self._tree.tag_configure(
+            "skipped", background=COLORS["warning_soft"], foreground=COLORS["warning_text"]
+        )
 
         # Double-click a row whose output exists -> open it in the configured STEP viewer
         self._tree.bind("<Double-1>", self._on_tree_double_click)

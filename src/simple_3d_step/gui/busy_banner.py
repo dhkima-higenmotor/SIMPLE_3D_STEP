@@ -11,15 +11,15 @@ from simple_3d_step.gui.theme import COLORS, FONTS
 
 
 class BusyBanner(tk.Frame):
-    """Prominent Modern Flat status banner displayed while the CAD subprocess is busy."""
+    """Prominent Slate + Indigo status banner displayed while the CAD subprocess is busy."""
 
-    BG = COLORS["accent_soft"]
-    BORDER = COLORS["accent_border"]
-    FG_TITLE = COLORS["accent_text"]
-    FG_DETAIL = "#334155"
-    BAR_BG = "#dbeafe"
-    BAR_FILL = COLORS["accent"]
-    BAR_PULSE = "#60a5fa"
+    BG = "#eef2ff"                   # Indigo-50
+    BORDER = COLORS["accent_border"] # Indigo-200 (#c7d2fe)
+    FG_TITLE = COLORS["accent_text"] # Indigo-800 (#3730a3)
+    FG_DETAIL = COLORS["fg_sub"]     # Slate-500 (#64748b)
+    BAR_BG = COLORS["accent_soft"]   # Indigo-100 (#e0e7ff)
+    BAR_FILL = COLORS["accent"]      # Indigo-500 (#6366f1)
+    BAR_PULSE = COLORS["accent_hover"]  # Indigo-400 (#818cf8)
 
     def __init__(
         self,
@@ -32,8 +32,8 @@ class BusyBanner(tk.Frame):
             background=self.BG,
             highlightbackground=self.BORDER,
             highlightthickness=1,
-            padx=12,
-            pady=8,
+            padx=10,
+            pady=5,
         )
         self._on_cancel = on_cancel
         self._on_force_cancel = on_force_cancel
@@ -59,20 +59,20 @@ class BusyBanner(tk.Frame):
         # Left: crisp rotating circular arc spinner
         self._spinner = tk.Canvas(
             self,
-            width=34,
-            height=34,
+            width=26,
+            height=26,
             background=self.BG,
             highlightthickness=0,
         )
-        self._spinner.grid(row=0, column=0, rowspan=2, padx=(0, 12), sticky=tk.W)
-        self._spinner.create_oval(3, 3, 31, 31, outline="#bfdbfe", width=3)
+        self._spinner.grid(row=0, column=0, rowspan=2, padx=(0, 10), sticky=tk.W)
+        self._spinner.create_oval(3, 3, 23, 23, outline=COLORS["accent_border"], width=2.5)
         self._arc_id = self._spinner.create_arc(
-            3, 3, 31, 31,
+            3, 3, 23, 23,
             start=0,
             extent=105,
             style=tk.ARC,
             outline=COLORS["accent"],
-            width=3,
+            width=2.5,
         )
 
         # Top middle: task title + percentage + elapsed timer pill
@@ -92,10 +92,10 @@ class BusyBanner(tk.Frame):
         tk.Label(
             top_row,
             textvariable=self._pct_var,
-            background="#dbeafe",
+            background=COLORS["accent_soft"],
             foreground=self.FG_TITLE,
             font=FONTS["mono_bold"],
-            padx=7,
+            padx=6,
             pady=1,
         ).grid(row=0, column=1, padx=(8, 6))
 

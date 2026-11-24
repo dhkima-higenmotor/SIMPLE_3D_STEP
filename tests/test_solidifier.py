@@ -9,8 +9,8 @@ from pathlib import Path
 from OCP.BRep import BRep_Builder
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
-from OCP.gp import gp_Pnt
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 from OCP.TopAbs import TopAbs_FACE
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS_Shell
@@ -21,6 +21,7 @@ from simple_3d_step.core.solidifier import (
     _extract_solids,
     _purge_final_closed_void_shells,
     _remove_closed_void_shells,
+    _split_tangent_pinch_wire_faces,
     simplify_assembly_to_single_solid,
 )
 from simple_3d_step.core.step_io import load_step_assembly, save_shape_to_step
@@ -181,3 +182,31 @@ def test_purge_internal_closed_void_shells_multi_and_single_shell() -> None:
     assert rep_hidden.shell_count == 1
     assert rep_hidden.face_count == 6
     assert abs(rep_hidden.volume - 64_000.0) < 1.0
+
+
+def test_tangent_pinch_wire_hole_healed_for_cad_assistant() -> None:
+    """Planar face with an internally-tangent circular hole splits cleanly with 0 unmeshed faces."""
+    outer = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0, 0, 1)), 30.3, 10.0).Solid()
+    # Hole of R=2.3 centered at X=28.0 -> 28.0 + 2.3 = 30.3 (exact internal tangency with outer rim)
+    hole = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(28.0, 0.0, -1.0), gp_Dir(0, 0, 1)), 2.3, 12.0).Solid()
+    cut_shape = BRepAlgoAPI_Cut(outer, hole).Shape()
+    solid = _extract_solids(cut_shape)[0]
+    rep_orig = validate_shape(solid)
+    assert rep_orig.solid_count == 1
+
+    # Pass all face indices to _split_tangent_pinch_wire_faces (non-pinched faces are skipped)
+    all_indices = set(range(rep_orig.face_count))
+    repaired, pinch_holes = _split_tangent_pinch_wire_faces(solid, all_indices)
+    assert repaired is not None
+    assert pinch_holes >= 2  # Top & bottom planar caps each have 1 tangent pinch-wire hole
+
+    rep_new = validate_shape(repaired)
+    assert rep_new.solid_count == 1
+    assert rep_new.shell_count == 1
+    assert rep_new.is_watertight is True
+    assert rep_new.is_valid is True
+    assert abs(rep_new.volume - rep_orig.volume) / rep_orig.volume < 1e-4
+
+    failed_profiles, failing_faces = _audit_prs_closed_meshing(repaired, fast=False)
+    assert failed_profiles == 0
+    assert not failing_faces

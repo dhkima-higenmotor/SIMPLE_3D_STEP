@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/icon.png" width="120" alt="SIMPLE 3D STEP application icon">
-</p>
-
 # SIMPLE 3D STEP
 
 > **Language:** **English** | [한국어 (README_KO.md)](README_KO.md)
@@ -12,27 +8,19 @@ A desktop and CLI tool for simplifying complex 3D STEP assemblies (containing in
 
 ## GUI Overview
 
-The application runs as a single window with two tabs — **Single Mode** for the interactive 4-step workflow, and **Batch Mode** for processing many STEP files in parallel across multiple CPU cores. Switch tabs at any time from the top of the window.
+The application runs as a compact, high-density single window (`800×590` default, DPI-aware `Segoe UI` 9–10 pt) using a clean **Slate + Indigo (Premium Light)** theme with two tabs — **Single Mode** for the interactive 4-step workflow, and **Batch Mode** for processing many STEP files in parallel across multiple CPU cores. Switch tabs at any time from the top of the window.
 
 ### Single Mode — Interactive 4-Step Workflow
 
 ![Single Mode GUI: completed part analysis and exact B-Rep solidification](docs/screenshots/gui_single_mode.png)
 
-External parts are kept (green) and hidden internal parts are dropped (red) in the parts table; the workflow buttons turn green `✔` as each step completes, and the result badge reports the final single-solid validation (`Solid 1 / Shell 1 · Fill +402,124 mm³`). The advanced parameter drawer on the right is hidden by default and toggled via **[Parameters]**.
+Primary workflow buttons (**Open STEP → 1. Analyze Parts → 2. Convert to Solid → Save Result**) are emphasized in Indigo blue and turn green `✔` as each step completes, while **Cancel** actions use a red danger style. External parts are kept and hidden internal parts are highlighted in soft rose (`Drop`) in the compact 7-row parts table, the result badge reports the final single-solid validation (`Solid 1 / Shell 1 · Fill +402,124 mm³`), and a compact 3-line light **Output Log** tracks progress at the bottom. The advanced parameter drawer on the right is hidden by default and toggled via **[Parameters]**.
 
 ### Batch Mode — Parallel Multi-File Queue
 
 ![Batch Mode GUI: STEP files processed in Batch Mode with results saved next to each source file](docs/screenshots/gui_batch_mode.png)
 
-Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / `Skipped`), source folder, and output file name. **RUN** processes the highlighted rows (or the whole queue when nothing is selected) in parallel across a persistent multi-worker CAD pool (`batch_workers` in `config.json`, `0` = Auto) with automatic per-worker thread budgeting, and the final `Batch finished — N succeeded, M failed` summary is shown in the status bar. **Double-click a completed row** to open its `<name>_simplified.step` in the configured external 3D viewer.
-
-### Application Icon
-
-<p align="center">
-  <img src="docs/images/icon_sizes_preview.png" width="680" alt="SIMPLE 3D STEP icon rendered at 16, 24, 32, 48, 64, 128 and 256 px on light and dark backgrounds">
-</p>
-
-The icon summarizes the whole tool in one mark: a clean **isometric solid cube** (one watertight body), an **engraved gear** on its front face (the hidden mechanical internals), and an **emerald check badge** (simplification complete). Small sizes (16–32 px) automatically switch to a compact variant without the gear engraving so the cube and check stay legible in the taskbar and file lists. The 512 px master is `docs/images/icon.png`, the window/taskbar icon is `src/simple_3d_step/gui/assets/app.ico` (16–256 px), and both are regenerated with `uv run python tools/make_icon.py`.
+Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / `Skipped`), source folder, and output file name. Primary actions (**Add STEP Files...** and **RUN**) are emphasized in Indigo blue, while **Force Stop**, **Stop**, and **Cancel** use the red danger style. **RUN** processes the highlighted rows (or the whole queue when nothing is selected) in parallel across a persistent multi-worker CAD pool (`batch_workers` in `config.json`, `0` = Auto) with automatic per-worker thread budgeting, and the final `Batch finished — N succeeded, M failed` summary is shown in the status bar. **Double-click a completed row** to open its `<name>_simplified.step` in the configured external 3D viewer.
 
 ---
 
@@ -54,14 +42,15 @@ The icon summarizes the whole tool in one mark: a clean **isometric solid cube**
 - **Inward Analytic B-Rep Internal Core**: Generates exact analytic cylinders (`MakeCylinder`) and polygonal prisms (`MakePrism`) strictly inside the outer wall safety inset (`core_inset_mm`), using multi-threaded Embree 3-axis occupancy sweeps and 26-direction sky-visibility carving (preventing leakage into cooling fin valleys or external grooves), plus adaptive constant-cross-section slab merging and conservative coaxial cylinder coalescing to minimize internal primitive count.
 - **Precision-First Boolean Fuse**: Attempts exact `fuzzy=0.0` parallel multi-tool Boolean union first with volume-preservation checks to protect fine fillets and tangent edges created in SolidWorks, CATIA, or NX, falling back to a spatial-proximity balanced binary-tree fuse ($O(N \log N)$) when exact batch fusion encounters tangent contacts.
 - **Complete Closed Internal Void-Shell Purge**: Strips both multi-shell internal cavities (`BRepClass3d.OuterShell_s` + `BRepBuilderAPI_MakeSolid`) and hidden single-shell disconnected cavity components (fast `Face→Edge` indexed adjacency BFS) in a mandatory final post-processing stage, guaranteeing a 100% solid interior with zero hollow pockets when sliced with a clipping plane.
-- **Cross-Kernel & OpenCASCADE CAD Assistant Compatibility**: Normalizes STEP output with 3D-curve export, clamped precision tolerances (`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` periodic-surface splitting, `ShapeFix_FixSmallFace` micro-sliver cleanup, zero-distortion curved edge splitting, and parallel `BRepCheck_Analyzer` validation so SolidWorks, eDrawings, FreeCAD, and OpenCASCADE CAD Assistant (OCCT 7.x) all display and cap the result as a solid body.
+- **Cross-Kernel & OpenCASCADE CAD Assistant Compatibility**: Normalizes STEP output with 3D-curve export, clamped precision tolerances (`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` periodic-surface splitting, `ShapeFix_FixSmallFace` micro-sliver cleanup, zero-distortion curved edge splitting, automatic **tangent pinch-wire hole splitting** (resolving OCCT `IMeshData_SelfIntersectingWire` failures when an inner hole is tangent to an outer boundary wire), and parallel `BRepCheck_Analyzer` validation so SolidWorks, eDrawings, FreeCAD, and OpenCASCADE CAD Assistant (OCCT 7.x) all display and cap the result as a solid body.
 - **Floating Exterior Part Bridging & Same-Domain Unification**: Connects tolerance-gapped exterior parts (connectors, fasteners) via hidden internal B-Rep pins found with multi-threaded `cKDTree(workers=-1)` queries and merges coplanar/co-surface faces with `ShapeUpgrade_UnifySameDomain`.
 
-### 4. Freeze-Free Modern Flat GUI (`tkinter` / `ttk`) & Multi-Core Batch Pool
+### 4. Freeze-Free Slate + Indigo GUI (`tkinter` / `ttk`) & Multi-Core Batch Pool
+- **Unified High-Density Slate + Indigo Theme**: DPI-aware `Segoe UI` (9–10 pt) typography, light Slate-50/100 surfaces, Indigo-500 primary action buttons, Rose-500 stop/cancel controls, and a compact `800×590` layout (7-row table + 3-line light Output Log).
 - **Two Mode Tabs in One Window**: **Single Mode** (interactive 4-step workflow with a parts table) and **Batch Mode** (`config.json`-driven multi-file parallel queue) switch instantly, each with its own background CAD workers so neither blocks the other.
 - **Dedicated Background CAD Process(es) (`multiprocessing`)**: Heavy OpenCASCADE C++ operations run in persistent worker process(es) so the GUI window never freezes (`Not Responding`). Batch Mode spawns a configurable pool of parallel workers (`batch_workers` in `config.json`, `0` = Auto) with per-worker `OSD_ThreadPool` and Embree thread budgeting to prevent core oversubscription.
-- **Live Busy Status Banner**: Displays an animated spinner, live elapsed timer, continuous pulse progress bar, and two-stage `Cancel / Force Stop` controls while updating the window title with elapsed time.
-- **Bold 4-Step Workflow Bar with State Feedback**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` are highlighted in bold and automatically transition between idle, running (blue `●`), and completed (green `✔`) states; manual part edits automatically reset downstream steps.
+- **Live Busy Status Banner**: Displays an animated spinner, live elapsed timer, continuous pulse progress bar, and two-stage red `Cancel / Force Stop` controls while updating the window title with elapsed time.
+- **Bold 4-Step Workflow Bar with State Feedback**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` are highlighted in bold Indigo blue and automatically transition between idle, running (`●`), and completed (emerald `✔`) states; manual part edits automatically reset downstream steps.
 - **Clean Compact Layout**: The right-side advanced parameters drawer is hidden by default and can be toggled on demand via the **[Parameters]** toolbar button.
 - **External 3D Viewer Integration**: Configure any installed 3D CAD viewer in `config.json` or **[Viewer Settings]** to open the **Original STEP**, **Kept Parts Preview**, or **Final Result STEP** with one click.
 
@@ -185,12 +174,9 @@ SIMPLE_3D_STEP/
 ├── pyproject.toml                   # uv project metadata and dependencies
 ├── run_simple_3d_step.bat           # Windows launcher (Single/Batch tabbed GUI, drag-and-drop, CLI)
 ├── docs/
-│   ├── images/                      # Application icon (512 px master + size preview sheet)
 │   ├── screenshots/                 # README GUI screenshots (Single Mode / Batch Mode)
 │   ├── theory.md                    # Key Features expanded into math & algorithms (English)
 │   └── theory_ko.md                 # Same document in Korean
-├── tools/
-│   └── make_icon.py                 # Regenerates docs/images/*.png and gui/assets/app.ico
 ├── src/simple_3d_step/
 │   ├── main.py                      # GUI and CLI entry point
 │   ├── config.py                    # config.json persistence and external viewer launcher
@@ -204,13 +190,13 @@ SIMPLE_3D_STEP/
 │   │   ├── validator.py             # Parallel BRepCheck_Analyzer and analytic surface verification
 │   │   └── worker.py                # Persistent multiprocessing CAD worker with thread budgeting
 │   └── gui/
-│       ├── theme.py                 # Modern Flat (Slate & Cobalt) design tokens & ttk theme
-│       ├── app.py                   # Unified window: Single/Batch mode tabs + 4-step workflow
+│       ├── theme.py                 # Slate + Indigo (Premium Light, DPI-aware) design tokens & ttk theme
+│       ├── app.py                   # Unified compact window: Single/Batch mode tabs + 4-step workflow
 │       ├── batch_panel.py           # Batch mode tab (multi-worker parallel RUN, config.json driven)
 │       ├── part_tree.py             # Assembly parts table (search/filter/sort/manual toggle)
 │       ├── control_panel.py         # Collapsible advanced parameters & result summary panel
 │       ├── busy_banner.py           # Animated background task banner
-│       ├── log_panel.py             # Bottom status bar, progress bar, and log console
+│       ├── log_panel.py             # Bottom status bar, progress bar, and 3-line light Output Log
 │       └── settings_dialog.py       # External 3D viewer settings dialog
 └── tests/
     ├── generate_sample_step.py      # Synthetic STEP assembly generator for automated tests

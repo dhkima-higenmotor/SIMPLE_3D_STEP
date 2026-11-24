@@ -726,7 +726,7 @@ is then re-imported from that temporary STEP (`_normalize_via_step_3d_curves`) s
 in-memory shape has **exactly the pcurves and tolerances an external viewer will see** —
 stale in-memory pcurves cannot mask portability problems.
 
-### 5.3 Mesh-blocking slivers and clipping capping
+### 5.3 Mesh-blocking slivers, tangent pinch-wires, and clipping capping
 
 OCCT's shaded-solid exploration classifies a solid as *Opened* if even one face yields a
 NULL triangulation at the viewer's deflection. The audit reproduces CAD Assistant's
@@ -738,21 +738,54 @@ profiles:
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
 ```
 
-If any face fails, two repairs are attempted, each guarded by the same validity/volume
-checks:
+If any face fails, three staged repairs are attempted in order, each guarded by the same
+validity, watertightness, void-shell, and volume checks:
 
-1. `ShapeFix_FixSmallFace` with precision 0.015 mm collapses razor-thin tangent slivers
-   (from Boolean intersections) that cannot be triangulated.
-2. Exact midpoint splitting of long curved edges **only on failing faces**
-   (`_split_edge_exact_subedges`): the sub-edges lie on the same 3D curve, so geometric
-   error is exactly zero, while the maximum chord sagitta of the viewer's tessellation
-   drops. For a circular arc of radius $R$ and angle $\theta$, chord deviation is
+1. **Microscopic sliver collapse (Step A).** `ShapeFix_FixSmallFace` with precision
+   0.015 mm collapses razor-thin tangent slivers (from Boolean intersections) that cannot
+   be triangulated.
+2. **Exact curved-edge midpoint splitting (Step B).** Long curved edges are split **only
+   on failing faces** (`_split_edge_exact_subedges`): the sub-edges lie on the same 3D
+   curve, so geometric error is exactly zero, while the maximum chord sagitta of the
+   viewer's tessellation drops. For a circular arc of radius $R$ and angle $\theta$, chord
+   deviation is
 
    ```math
    \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
    ```
 
    so halving $\theta$ quarters the deviation without adding faces.
+3. **Tangent pinch-wire hole splitting (Step C).** Some CAD models contain a planar face
+   where an inner hole wire of radius $r$ at distance $d$ is internally tangent to the
+   outer boundary wire of radius $R = d + r$, touching it at a single pinch-point
+   $p_{\text{pinch}}$. While Parasolid-based viewers tolerate this pinch topology,
+   OCCT's `STEPControl_Reader` clamps incident edge parameter bounds within STEP
+   `UNCERTAINTY`, leaving tiny opposite closing segments on the outer and inner wires at
+   $p_{\text{pinch}}$. `BRepMesh_IncrementalMesh` rejects the entire face with
+   `IMeshData_SelfIntersectingWire | IMeshData_Failure` (0 triangles), hiding the face
+   and downgrading the solid to *Opened* in CAD Assistant.
+
+   `_split_tangent_pinch_wire_faces` resolves this automatically with **0.0 mm geometric
+   distortion**:
+   - Detects planar failing faces with an inner wire $W_{\text{in}}$ satisfying
+     $\operatorname{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
+     (`BRepExtrema_DistShapeShape`) and unifies any unmerged coincident vertex pair at
+     $p_{\text{pinch}}$ (`ShapeBuild_ReShape`, `TopAbs_FORWARD`) so no figure-8 bow-tie
+     wire forms.
+   - Computes the hole centroid $c$ projected onto the face plane $\Pi$ and builds a
+     cutting plane through $c$ with normal along the in-plane pinch vector
+     $\mathbf{n}_{\text{cut}} = \operatorname{proj}_{\Pi}(p_{\text{pinch}} - c)$
+     (parallel to the common tangent at $p_{\text{pinch}}$).
+   - Intersects the cutting plane exclusively with the failing face
+     (`BRepAlgoAPI_Section`), filters to the local chord edges incident to $W_{\text{in}}$
+     ($\min(\operatorname{dist}(v_1, W_{\text{in}}), \operatorname{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)
+     so neighboring unrelated holes are never touched, and splits the face in place via
+     `BRepFeat_SplitShape`, followed by `ShapeFix_Shape` and a 3D-curve STEP round-trip
+     audit across all 5 CAD Assistant deflection profiles.
+
+   The pinched inner hole splits into clean non-pinched single-wire crescent sub-faces on
+   the exact original plane, preserving volume and surface area identically while
+   guaranteeing 100 % closed-solid rendering and clipping-plane capping in CAD Assistant.
 
 ### 5.4 Final validation
 

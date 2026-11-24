@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/icon.png" width="120" alt="SIMPLE 3D STEP 애플리케이션 아이콘">
-</p>
-
 # SIMPLE 3D STEP
 
 > **Language:** [English (README.md)](README.md) | **한국어**
@@ -12,27 +8,19 @@
 
 ## GUI 화면
 
-하나의 창에서 **Single Mode**(대화형 4단계 워크플로우)와 **Batch Mode**(멀티 CPU 코어 기반 다중 STEP 파일 병렬 처리) 탭을 언제든 전환할 수 있습니다.
+**Slate + Indigo (Premium Light)** 테마와 Windows DPI 인식 `Segoe UI` (9–10pt) 폰트를 적용한 컴팩트 고밀도 단일 창(기본 `800×590`)에서 **Single Mode**(대화형 4단계 워크플로우)와 **Batch Mode**(멀티 CPU 코어 기반 다중 STEP 파일 병렬 처리) 탭을 언제든 전환할 수 있습니다.
 
 ### Single Mode — 대화형 4단계 워크플로우
 
 ![Single Mode 화면: 부품 분석과 정밀 B-Rep 솔리드화 완료 상태](docs/screenshots/gui_single_mode.png)
 
-부품 테이블에서 외관 부품은 녹색(Keep), 숨은 내부 부품은 적색(Drop)으로 표시되고, 각 단계가 끝나면 워크플로우 버튼이 녹색 `✔`로 바뀝니다. 우측 결과 배지에는 최종 단일 솔리드 검증 결과(`Solid 1 / Shell 1 · Fill +402,124 mm³`)가 표시됩니다. 우측 고급 파라미터 패널은 기본 숨김이며 **[Parameters]** 버튼으로 토글합니다.
+상단 4단계 워크플로우 버튼(**Open STEP → 1. Analyze Parts → 2. Convert to Solid → Save Result**)은 파란색(Indigo)으로 강조되며 완료된 단계는 녹색 `✔`로 바뀌고, **Cancel** 버튼은 빨간색(Rose) 스타일로 표시됩니다. 7행 기준의 컴팩트 부품 테이블에서 외관 부품은 유지(Keep), 숨은 내부 부품은 연한 적색(Drop)으로 표시되며, 우측 결과 배지(`Solid 1 / Shell 1 · Fill +402,124 mm³`)와 하단 3행 라이트 **Output Log**로 진행 상태를 한눈에 확인할 수 있습니다. 우측 고급 파라미터 패널은 기본 숨김이며 **[Parameters]** 버튼으로 토글합니다.
 
 ### Batch Mode — 다중 파일 병렬 처리
 
 ![Batch Mode 화면: Batch Mode에서 STEP 파일을 처리하고 각 원본과 같은 폴더에 결과 저장](docs/screenshots/gui_batch_mode.png)
 
-대기 중인 각 파일의 상태(`Pending` / `Running` / `Done` / `Failed` / `Skipped`), 원본 폴더, 출력 파일명이 표시됩니다. **[RUN]**을 누르면 선택된 행(선택이 없으면 전체 큐)을 `config.json` 파라미터와 상주형 멀티 워커 CAD 풀(`batch_workers`, `0` = Auto) 및 워커별 스레드 예산 분할로 병렬 처리하고, 상태바에 `Batch finished — N succeeded, M failed` 요약이 표시됩니다. **출력이 생성된 행을 더블클릭**하면 해당 `<파일명>_simplified.step` 파일이 설정된 외부 3D 뷰어로 열립니다.
-
-### 애플리케이션 아이콘
-
-<p align="center">
-  <img src="docs/images/icon_sizes_preview.png" width="680" alt="밝은 배경과 어두운 배경에서 16, 24, 32, 48, 64, 128, 256px로 렌더링한 SIMPLE 3D STEP 아이콘">
-</p>
-
-도구의 특징을 한 개의 마크로 요약했습니다. **등각 투영 솔리드 큐브**(단일 Watertight Solid), 앞면의 **음각 기어**(숨겨진 내부 기계 부품), **에메랄드 체크 배지**(단순화 완료)로 구성됩니다. 소형 사이즈(16–32px)는 기어 음각을 생략한 단순화 변형을 자동 적용해 작업 표시줄과 파일 목록에서도 큐브와 체크가 또렷하게 보입니다. 512px 원본은 `docs/images/icon.png`, 창·작업 표시줄 아이콘은 `src/simple_3d_step/gui/assets/app.ico`(16–256px)에 있으며, `uv run python tools/make_icon.py`로 한 번에 재생성할 수 있습니다.
+대기 중인 각 파일의 상태(`Pending` / `Running` / `Done` / `Failed` / `Skipped`), 원본 폴더, 출력 파일명이 표시됩니다. 주요 실행 버튼(**Add STEP Files...**, **RUN**)은 파란색(Indigo)으로 강조되고, **Force Stop**, **Stop**, **Cancel** 버튼은 빨간색(Rose) 스타일로 구분됩니다. **[RUN]**을 누르면 선택된 행(선택이 없으면 전체 큐)을 `config.json` 파라미터와 상주형 멀티 워커 CAD 풀(`batch_workers`, `0` = Auto) 및 워커별 스레드 예산 분할로 병렬 처리하고, 상태바에 `Batch finished — N succeeded, M failed` 요약이 표시됩니다. **출력이 생성된 행을 더블클릭**하면 해당 `<파일명>_simplified.step` 파일이 설정된 외부 3D 뷰어로 열립니다.
 
 ---
 
@@ -54,14 +42,15 @@
 - **외벽 안쪽 해석적 B-Rep 내부 코어**: 외피에서 안전 여백(`core_inset_mm`) 안쪽 영역에 멀티스레드 Embree 3축 점유 스윕과 26방향 하늘 가시성 보호(방열핀 골짜기·외부 홈 유출 방지)를 적용하고, 동일 단면 연속 슬랩 병합 및 보수적 동축 원통 병합으로 불필요한 내부 분할을 줄인 해석적 원통(`MakeCylinder`)·다각 프리즘(`MakePrism`) 코어를 생성합니다.
 - **정밀 우선 Boolean Fuse**: `fuzzy=0.0` 병렬 다중 도구 결합을 우선 시도하고 부피 보존 검증을 수행해 SolidWorks·CATIA·NX의 미세 필렛과 탄젠트 엣지 손상을 방지하며, 폴백 시 공간 근접 기반 균형 이진 트리($O(N \log N)$) 병합을 사용합니다.
 - **밀폐 내부 공동(Closed Void Shell) 완전 제거**: 최종 후처리 단계에서 다중 쉘 내부 공동(`BRepClass3d.OuterShell_s` + `BRepBuilderAPI_MakeSolid`)뿐만 아니라 단일 쉘 내부에 숨어 있는 비연결 내부 공동 컴포넌트(고속 `Face→Edge` 인덱스 인접 그래프 BFS)까지 모두 소거하여, 단면 절단 시 속이 완전히 꽉 찬 솔리드를 보장합니다.
-- **이종 CAD 커널 및 OpenCASCADE CAD Assistant 호환성**: 3D 커브 기반 STEP 정규화, 정밀도 허용 오차 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, `ShapeFix_FixSmallFace` 미세 슬리버 정리, 무왜곡 곡선 엣지 분할, 병렬 `BRepCheck_Analyzer` 검증을 적용하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 단면 캡핑까지 정상 Solid로 표시됩니다.
+- **이종 CAD 커널 및 OpenCASCADE CAD Assistant 호환성**: 3D 커브 기반 STEP 정규화, 정밀도 허용 오차 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, `ShapeFix_FixSmallFace` 미세 슬리버 정리, 무왜곡 곡선 엣지 분할, 자동 **내접 핀치 와이어 홀 분할**(외곽 경계에 내접하는 내부 홀에서 발생하는 OCCT `IMeshData_SelfIntersectingWire` 삼각화 실패 해소), 병렬 `BRepCheck_Analyzer` 검증을 적용하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 단면 캡핑까지 정상 Solid로 표시됩니다.
 - **공차 분리 외관 부품 연결 및 동일 곡면 통합**: 멀티스레드 `cKDTree(workers=-1)` 탐색으로 미세 공차로 떠 있는 외관 부품(커넥터·볼트 등)을 숨겨진 내부 B-Rep 핀으로 연결하고 `ShapeUpgrade_UnifySameDomain`으로 동일 평면·곡면을 통합합니다.
 
-### 4. 프리징 없는 Modern Flat GUI (`tkinter` / `ttk`) 및 멀티코어 배치 풀
+### 4. 프리징 없는 Slate + Indigo GUI (`tkinter` / `ttk`) 및 멀티코어 배치 풀
+- **고밀도 Slate + Indigo 통일 테마**: DPI 인식 `Segoe UI`(9–10pt) 폰트, 밝은 Slate-50/100 배경, Indigo 파란색 주요 실행 버튼, Rose 빨간색 중지·취소 버튼, 컴팩트 `800×590` 창(7행 부품 테이블 + 3행 라이트 Output Log)으로 높은 정보 밀도를 제공합니다.
 - **하나의 창에서 두 가지 모드 탭**: **Single Mode**(부품 테이블 기반 대화형 4단계 워크플로우)와 **Batch Mode**(`config.json` 기반 다중 파일 병렬 처리)를 즉시 전환할 수 있으며, 모드별로 독립된 백그라운드 CAD 워커를 사용해 서로 블로킹하지 않습니다.
 - **전용 백그라운드 CAD 프로세스 풀 (`multiprocessing`)**: 무거운 OpenCASCADE C++ 연산을 상주형 워커 프로세스(들)에서 처리하므로 GUI 창이 절대 멈추지(`응답 없음`) 않습니다. Batch Mode는 `config.json`의 `batch_workers`(`0` = Auto)에 따라 다중 워커를 병렬 실행하며, 워커별 `OSD_ThreadPool`과 Embree 스레드 예산을 자동 분할해 코어 과구독을 방지합니다.
-- **실시간 작업 상태 배너**: 작업 중 회전 스피너, 실시간 경과 타이머, 연속 펄스 진행 바, 2단계 `Cancel / Force Stop` 버튼을 표시하며 창 제목에도 경과 시간을 반영합니다.
-- **Bold 강조 4단계 워크플로우 바 및 상태 피드백**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` 버튼이 굵은(Bold) 폰트로 강조되며 대기 / 실행 중(파랑 `●`) / 정상 완료(녹색 `✔`) 상태로 자동 전환됩니다. 부품 선택을 수동 수정하면 하위 단계 상태가 자동 초기화됩니다.
+- **실시간 작업 상태 배너**: 작업 중 회전 스피너, 실시간 경과 타이머, 연속 펄스 진행 바, 빨간색 2단계 `Cancel / Force Stop` 버튼을 표시하며 창 제목에도 경과 시간을 반영합니다.
+- **Bold 강조 4단계 워크플로우 바 및 상태 피드백**: `Open STEP › 1. Analyze Parts › 2. Convert to Solid › Save Result` 버튼이 파란색 볼드 스타일로 강조되며 대기 / 실행 중(`●`) / 정상 완료(녹색 `✔`) 상태로 자동 전환됩니다. 부품 선택을 수동 수정하면 하위 단계 상태가 자동 초기화됩니다.
 - **깔끔하고 컴팩트한 레이아웃**: 우측 고급 파라미터 패널은 기본 숨김 상태이며 필요할 때만 툴바의 **[Parameters]** 버튼으로 토글해 조정할 수 있습니다.
 - **외부 3D 뷰어 연동**: `config.json` 또는 GUI의 **[Viewer Settings]**에서 설치된 외부 3D CAD 뷰어를 지정하면 **원본 STEP**, **유지 부품 미리보기**, **최종 결과 STEP**을 원클릭으로 바로 열 수 있습니다.
 
@@ -185,12 +174,9 @@ SIMPLE_3D_STEP/
 ├── pyproject.toml                   # uv 프로젝트 메타데이터 및 의존성 정의
 ├── run_simple_3d_step.bat           # Windows 실행 배치 파일 (Single/Batch 탭 GUI, 드래그앤드롭, CLI 겸용)
 ├── docs/
-│   ├── images/                      # 애플리케이션 아이콘 (512px 원본 + 크기 미리보기 시트)
 │   ├── screenshots/                 # README GUI 화면 캡처 (Single Mode / Batch Mode)
 │   ├── theory.md                    # 주요 특징의 수학·알고리즘 배경 (영문)
 │   └── theory_ko.md                 # 동일 문서의 한국어 버전
-├── tools/
-│   └── make_icon.py                 # docs/images/*.png 및 gui/assets/app.ico 재생성 스크립트
 ├── src/simple_3d_step/
 │   ├── main.py                      # GUI 및 CLI 엔트리포인트
 │   ├── config.py                    # config.json 저장/로드 및 외부 뷰어 실행
@@ -204,13 +190,13 @@ SIMPLE_3D_STEP/
 │   │   ├── validator.py             # 병렬 BRepCheck_Analyzer 및 해석 곡면 구성 검증
 │   │   └── worker.py                # 스레드 예산 제어가 포함된 상주형 multiprocessing CAD 워커
 │   └── gui/
-│       ├── theme.py                 # Modern Flat (Slate & Cobalt) 디자인 토큰 및 ttk 테마
-│       ├── app.py                   # 통합 GUI 창: Single/Batch 모드 탭 + 4단계 워크플로우
+│       ├── theme.py                 # Slate + Indigo (Premium Light, DPI 인식) 디자인 토큰 및 ttk 테마
+│       ├── app.py                   # 통합 컴팩트 GUI 창: Single/Batch 모드 탭 + 4단계 워크플로우
 │       ├── batch_panel.py           # Batch 모드 탭 (config.json 기반 다중 워커 병렬 RUN)
 │       ├── part_tree.py             # 어셈블리 부품 테이블 (검색/필터/정렬/수동 토글)
 │       ├── control_panel.py         # 토글형 고급 파라미터 및 결과 요약 패널
 │       ├── busy_banner.py           # 백그라운드 작업 애니메이션 배너
-│       ├── log_panel.py             # 하단 상태바·진행률·로그 콘솔
+│       ├── log_panel.py             # 하단 상태바·진행률·3행 라이트 Output Log
 │       └── settings_dialog.py       # 외부 3D 뷰어 설정 대화상자
 └── tests/
     ├── generate_sample_step.py      # 자동 테스트용 합성 STEP 어셈블리 생성기

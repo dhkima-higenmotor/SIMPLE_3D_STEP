@@ -1,4 +1,8 @@
-"""Centralized Modern Flat UI design tokens and ttk style configuration."""
+"""Centralized Slate + Indigo (Premium Light) design tokens and ttk style configuration.
+
+Visually unified with the AUTO_RENDER GUI (Slate-50/100/200 surfaces, Indigo-500 accent,
+Emerald-600 primary actions, Rose-500 danger actions, and crisp DPI-aware Segoe UI 9-10pt).
+"""
 
 from __future__ import annotations
 
@@ -6,90 +10,133 @@ import tkinter as tk
 from tkinter import ttk
 
 
-# --- Modern Flat Slate & Cobalt Design Tokens ---
-COLORS = {
-    "app_bg": "#f1f5f9",          # Cool slate canvas background
-    "surface": "#ffffff",         # Elevated crisp white card / toolbar
-    "surface_alt": "#f8fafc",     # Subtle secondary strip (headers, footers)
-    "surface_hover": "#f1f5f9",   # Soft hover surface
-    "border": "#e2e8f0",          # 1px hairline border (slate-200)
-    "border_strong": "#cbd5e1",   # Control outline (slate-300)
-    "text": "#0f172a",            # Primary ink (slate-900)
-    "text_secondary": "#475569",  # Secondary ink (slate-600)
-    "text_muted": "#94a3b8",      # Disabled / hint ink (slate-400)
-    # Brand accent (Cobalt)
-    "accent": "#2563eb",
-    "accent_hover": "#1d4ed8",
-    "accent_soft": "#eff6ff",
-    "accent_border": "#93c5fd",
-    "accent_text": "#1e40af",
-    # Success (Emerald)
-    "success": "#059669",
-    "success_soft": "#ecfdf5",
-    "success_hover": "#d1fae5",
-    "success_border": "#34d399",
-    "success_text": "#065f46",
-    # Danger / Internal (Rose)
-    "danger": "#dc2626",
-    "danger_hover": "#b91c1c",
-    "danger_soft": "#fef2f2",
-    "danger_text": "#991b1b",
-    # Warning / Manual drop (Amber)
-    "warning_soft": "#fffbeb",
-    "warning_text": "#92400e",
-    # Dark console
-    "console_bg": "#0f172a",
-    "console_fg": "#e2e8f0",
-    "console_muted": "#64748b",
-}
+def enable_dpi_awareness() -> None:
+    """Make the process DPI-aware on Windows to render sharp system fonts (matching AUTO_RENDER)."""
+    try:
+        import ctypes
 
-# Large high-readability fonts (~2x original 8-10pt scale)
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+
+# Match AUTO_RENDER_GUI.py: activate DPI awareness at module import before Tk() is created
+enable_dpi_awareness()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Centralized System Font Definitions (Identical to AUTO_RENDER_GUI)
+# ═══════════════════════════════════════════════════════════════════
+SYSTEM_FONT = ("Segoe UI", 9)
+SYSTEM_FONT_BOLD = ("Segoe UI", 9, "bold")
+SYSTEM_FONT_LARGE_BOLD = ("Segoe UI", 10, "bold")
+
 FONTS = {
-    "base": ("Segoe UI", 15),
-    "base_bold": ("Segoe UI", 15, "bold"),
-    "small": ("Segoe UI", 13),
-    "small_bold": ("Segoe UI", 13, "bold"),
-    "heading": ("Segoe UI", 17, "bold"),
-    "mono": ("Consolas", 14),
-    "mono_bold": ("Consolas", 14, "bold"),
+    "base": SYSTEM_FONT,
+    "base_bold": SYSTEM_FONT_BOLD,
+    "small": SYSTEM_FONT,
+    "small_bold": SYSTEM_FONT_BOLD,
+    "heading": SYSTEM_FONT_LARGE_BOLD,
+    "mono": SYSTEM_FONT,
+    "mono_bold": SYSTEM_FONT_BOLD,
 }
 
-# Sequential workflow button visual states (1px flat border + bold emphasis in all states)
+
+# ═══════════════════════════════════════════════════════════════════
+# Color Palette — Slate + Indigo (Premium Light, Identical to AUTO_RENDER)
+# ═══════════════════════════════════════════════════════════════════
+COLORS = {
+    # Core AUTO_RENDER palette tokens
+    "bg": "#f8fafc",            # Slate-50    — root background & frame background
+    "bg_light": "#f8fafc",      # Slate-50    — unified card background with root bg
+    "bg_dark": "#f1f5f9",       # Slate-100   — text inputs / log output / treeview
+    "fg": "#0f172a",            # Slate-900   — primary text
+    "fg_dim": "#94a3b8",        # Slate-400   — disabled text
+    "fg_sub": "#64748b",        # Slate-500   — secondary text
+    "accent": "#6366f1",        # Indigo-500  — primary accent / selection bg
+    "accent_hover": "#818cf8",  # Indigo-400  — Info button hover
+    "accent_soft": "#e0e7ff",   # Indigo-100  — selection tint / soft highlight
+    "accent_border": "#c7d2fe", # Indigo-200  — subtle indigo border
+    "accent_text": "#3730a3",   # Indigo-800  — selected / strong indigo ink
+    "green": "#34d399",         # Emerald-400 — success hover
+    "green_dim": "#059669",     # Emerald-600 — success button bg
+    "red": "#f43f5e",           # Rose-500    — error / danger
+    "peach": "#f59e0b",         # Amber-500   — warning
+    "border": "#e2e8f0",        # Slate-200   — borders & flat button fill
+    "surface2": "#f1f5f9",      # Slate-100   — hover / selection
+    # Semantic aliases mapped directly onto the AUTO_RENDER palette
+    "app_bg": "#f8fafc",        # == bg
+    "surface": "#f8fafc",       # == bg_light
+    "surface_alt": "#f1f5f9",   # == bg_dark / surface2
+    "surface_hover": "#f1f5f9", # == surface2
+    "border_strong": "#e2e8f0", # == border
+    "text": "#0f172a",          # == fg
+    "text_secondary": "#64748b",# == fg_sub
+    "text_muted": "#94a3b8",    # == fg_dim
+    # Success (Emerald)
+    "success": "#059669",       # == green_dim
+    "success_soft": "#ecfdf5",  # Emerald-50
+    "success_hover": "#d1fae5", # Emerald-100
+    "success_border": "#34d399",# == green
+    "success_text": "#059669",  # == green_dim
+    # Danger / Internal (Rose)
+    "danger": "#f43f5e",        # == red
+    "danger_hover": "#e11d48",  # Rose-600 (AUTO_RENDER Danger active fg)
+    "danger_soft": "#fff1f2",   # Rose-50  (AUTO_RENDER Danger active bg)
+    "danger_text": "#e11d48",   # Rose-600
+    # Warning / Manual drop (Amber)
+    "warning_soft": "#fffbeb",  # Amber-50
+    "warning_text": "#b45309",  # Amber-700
+    # Light Output Log (matches AUTO_RENDER Output Log)
+    "console_bg": "#f1f5f9",    # == bg_dark
+    "console_fg": "#0f172a",    # == fg
+    "console_muted": "#64748b", # == fg_sub
+}
+
+# Sequential workflow button visual states (Indigo blue primary + Emerald done)
 STEP_STYLES = {
     "idle": {
-        "bg": "#ffffff",
-        "hover_bg": "#f1f5f9",
-        "fg": "#1e293b",
-        "border": "#cbd5e1",
+        "bg": COLORS["accent"],          # #6366f1 (Indigo-500 blue emphasis)
+        "hover_bg": COLORS["accent_hover"],  # #818cf8 (Indigo-400)
+        "fg": "#ffffff",
+        "disabled_fg": "#c7d2fe",        # Indigo-200 on Indigo-500 when disabled
+        "border": COLORS["accent"],      # #6366f1
         "prefix": "",
-        "font": FONTS["base_bold"],
+        "font": SYSTEM_FONT_BOLD,
     },
     "running": {
-        "bg": "#eff6ff",
-        "hover_bg": "#dbeafe",
-        "fg": "#1d4ed8",
-        "border": "#3b82f6",
+        "bg": COLORS["accent_soft"],     # #e0e7ff (Indigo-100)
+        "hover_bg": COLORS["accent_border"],
+        "fg": COLORS["accent_text"],     # #3730a3 (Indigo-800)
+        "disabled_fg": COLORS["accent"],
+        "border": COLORS["accent"],      # #6366f1 (Indigo-500)
         "prefix": "● ",
-        "font": FONTS["base_bold"],
+        "font": SYSTEM_FONT_BOLD,
     },
     "done": {
-        "bg": "#ecfdf5",
-        "hover_bg": "#d1fae5",
-        "fg": "#065f46",
-        "border": "#34d399",
+        "bg": COLORS["success_soft"],    # #ecfdf5 (Emerald-50)
+        "hover_bg": COLORS["success_hover"],
+        "fg": COLORS["green_dim"],       # #059669 (Emerald-600)
+        "disabled_fg": COLORS["green"],
+        "border": COLORS["green"],       # #34d399 (Emerald-400)
         "prefix": "✔ ",
-        "font": FONTS["base_bold"],
+        "font": SYSTEM_FONT_BOLD,
     },
 }
 
 
 def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
-    """Configure a sleek, high-readability Modern Flat ttk theme built on 'clam'."""
-    root.configure(background=COLORS["app_bg"])
+    """Configure all ttk widget styles using the AUTO_RENDER Slate + Indigo palette."""
+    C = COLORS
+    root.configure(background=C["bg"])
 
-    # Ensure dropdown popups (Combobox listbox, menus) also inherit larger readable font
-    root.option_add("*TCombobox*Listbox.font", FONTS["small"])
-    root.option_add("*Font", FONTS["base"])
+    # Centralized system font uniformity (matching AUTO_RENDER_GUI)
+    root.option_add("*Font", SYSTEM_FONT)
+    root.option_add("*TCombobox*Listbox.font", SYSTEM_FONT)
+    root.option_add("*TCombobox*Listbox.background", C["bg_dark"])
+    root.option_add("*TCombobox*Listbox.foreground", C["fg"])
+    root.option_add("*TCombobox*Listbox.selectBackground", C["accent_soft"])
+    root.option_add("*TCombobox*Listbox.selectForeground", C["accent_text"])
 
     style = ttk.Style(root)
     if "clam" in style.theme_names():
@@ -98,383 +145,447 @@ def apply_modern_flat_theme(root: tk.Tk) -> ttk.Style:
     # Global defaults
     style.configure(
         ".",
-        background=COLORS["app_bg"],
-        foreground=COLORS["text"],
-        font=FONTS["base"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface"],
-        darkcolor=COLORS["border"],
-        focuscolor=COLORS["accent"],
+        background=C["bg"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+        bordercolor=C["border"],
+        lightcolor=C["bg_light"],
+        darkcolor=C["bg_light"],
+        focuscolor=C["accent"],
     )
 
-    # Frames
-    style.configure("TFrame", background=COLORS["app_bg"])
-    style.configure("Card.TFrame", background=COLORS["surface"])
-    style.configure("Subtle.TFrame", background=COLORS["surface_alt"])
-    style.configure("Toolbar.TFrame", background=COLORS["surface"])
+    # ── Frame ──
+    style.configure("TFrame", background=C["bg"])
+    style.configure("Card.TFrame", background=C["bg_light"])
+    style.configure("Subtle.TFrame", background=C["bg_light"])
+    style.configure("Toolbar.TFrame", background=C["bg_light"])
 
-    # Labels
-    style.configure("TLabel", background=COLORS["app_bg"], foreground=COLORS["text"], font=FONTS["base"])
-    style.configure("Card.TLabel", background=COLORS["surface"], foreground=COLORS["text"], font=FONTS["small"])
-    style.configure(
-        "Muted.TLabel",
-        background=COLORS["surface"],
-        foreground=COLORS["text_secondary"],
-        font=FONTS["small"],
-    )
-    style.configure(
-        "Subtle.TLabel",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text_secondary"],
-        font=FONTS["small"],
-    )
-    style.configure(
-        "Accent.TLabel",
-        background=COLORS["surface"],
-        foreground=COLORS["accent_text"],
-        font=FONTS["base_bold"],
-    )
-    style.configure(
-        "SectionTitle.TLabel",
-        background=COLORS["surface"],
-        foreground=COLORS["text"],
-        font=FONTS["heading"],
-    )
-
-    # Flat LabelFrames
+    # ── LabelFrame (signature Indigo-500 bold header from AUTO_RENDER) ──
     style.configure(
         "TLabelframe",
-        background=COLORS["surface"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface"],
-        darkcolor=COLORS["border"],
-        borderwidth=1,
-        relief="solid",
+        background=C["bg_light"],
+        bordercolor=C["border"],
+        lightcolor=C["bg_light"],
+        darkcolor=C["bg_light"],
     )
     style.configure(
         "TLabelframe.Label",
-        background=COLORS["surface"],
-        foreground=COLORS["text_secondary"],
-        font=FONTS["small_bold"],
+        background=C["bg_light"],
+        foreground=C["accent"],
+        font=SYSTEM_FONT_LARGE_BOLD,
     )
 
-    # Standard Flat Buttons
+    # ── Label ──
+    style.configure(
+        "TLabel",
+        background=C["bg"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+    )
+    style.configure(
+        "Card.TLabel",
+        background=C["bg_light"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+    )
+    style.configure(
+        "Path.TLabel",
+        background=C["bg_light"],
+        foreground=C["accent"],
+        font=SYSTEM_FONT,
+    )
+    style.configure(
+        "Bold.TLabel",
+        background=C["bg"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT_BOLD,
+    )
+    style.configure(
+        "CardBold.TLabel",
+        background=C["bg_light"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT_BOLD,
+    )
+    style.configure(
+        "Muted.TLabel",
+        background=C["bg_light"],
+        foreground=C["fg_sub"],
+        font=SYSTEM_FONT,
+    )
+    style.configure(
+        "Subtle.TLabel",
+        background=C["bg_light"],
+        foreground=C["fg_sub"],
+        font=SYSTEM_FONT,
+    )
+    style.configure(
+        "Accent.TLabel",
+        background=C["bg_light"],
+        foreground=C["accent"],
+        font=SYSTEM_FONT_BOLD,
+    )
+    style.configure(
+        "SectionTitle.TLabel",
+        background=C["bg_light"],
+        foreground=C["accent"],
+        font=SYSTEM_FONT_LARGE_BOLD,
+    )
+
+    # ── Flat Buttons Configuration (Identical to AUTO_RENDER_GUI) ──
+    # Default Button (flat Slate-200)
     style.configure(
         "TButton",
-        background=COLORS["surface"],
-        foreground=COLORS["text"],
-        bordercolor=COLORS["border_strong"],
-        lightcolor=COLORS["surface"],
-        darkcolor=COLORS["border_strong"],
-        borderwidth=1,
-        relief="solid",
-        padding=(10, 4),
-        font=FONTS["small"],
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        font=SYSTEM_FONT,
+        padding=(6, 4),
     )
     style.map(
         "TButton",
-        background=[
-            ("disabled", COLORS["surface_alt"]),
-            ("pressed", "#e2e8f0"),
-            ("active", COLORS["surface_hover"]),
-        ],
-        foreground=[
-            ("disabled", COLORS["text_muted"]),
-            ("active", COLORS["text"]),
-        ],
-        bordercolor=[
-            ("disabled", COLORS["border"]),
-            ("active", "#94a3b8"),
-        ],
+        background=[("active", C["surface2"]), ("pressed", C["border"])],
+        foreground=[("disabled", C["fg_dim"])],
+        bordercolor=[("active", C["border"])],
     )
 
-    # Toolbar Flat Buttons
+    # Toolbar Button (matches AUTO_RENDER default TButton)
     style.configure(
         "Toolbar.TButton",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface_alt"],
-        darkcolor=COLORS["border"],
-        borderwidth=1,
-        relief="solid",
-        padding=(10, 4),
-        font=FONTS["small"],
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        font=SYSTEM_FONT,
+        padding=(8, 4),
     )
     style.map(
         "Toolbar.TButton",
-        background=[
-            ("disabled", COLORS["surface"]),
-            ("pressed", "#e2e8f0"),
-            ("active", "#e2e8f0"),
-        ],
-        foreground=[
-            ("disabled", COLORS["text_muted"]),
-            ("active", COLORS["text"]),
-        ],
-        bordercolor=[
-            ("disabled", COLORS["border"]),
-            ("active", COLORS["border_strong"]),
-        ],
+        background=[("active", C["surface2"]), ("pressed", C["border"])],
+        foreground=[("disabled", C["fg_dim"])],
+        bordercolor=[("active", C["border"])],
     )
 
-    # Primary Cobalt Accent Button
-    style.configure(
-        "Primary.TButton",
-        background=COLORS["accent"],
-        foreground="#ffffff",
-        bordercolor=COLORS["accent"],
-        lightcolor=COLORS["accent"],
-        darkcolor=COLORS["accent_hover"],
-        borderwidth=1,
-        relief="flat",
-        padding=(12, 6),
-        font=FONTS["small_bold"],
-    )
-    style.map(
-        "Primary.TButton",
-        background=[
-            ("disabled", "#cbd5e1"),
-            ("pressed", "#1e40af"),
-            ("active", COLORS["accent_hover"]),
-        ],
-        foreground=[("disabled", "#f8fafc")],
-        bordercolor=[
-            ("disabled", "#cbd5e1"),
-            ("active", COLORS["accent_hover"]),
-        ],
-    )
-
-    # Danger Flat Button (Cancel / Force stop)
-    style.configure(
-        "Danger.TButton",
-        background=COLORS["danger_soft"],
-        foreground=COLORS["danger_text"],
-        bordercolor="#fca5a5",
-        lightcolor=COLORS["danger_soft"],
-        darkcolor="#fca5a5",
-        borderwidth=1,
-        relief="solid",
-        padding=(10, 4),
-        font=FONTS["small_bold"],
-    )
-    style.map(
-        "Danger.TButton",
-        background=[
-            ("disabled", COLORS["surface_alt"]),
-            ("pressed", "#fecaca"),
-            ("active", "#fee2e2"),
-        ],
-        foreground=[("disabled", COLORS["text_muted"])],
-        bordercolor=[("disabled", COLORS["border"])],
-    )
-
-    # Compact Small Flat Buttons (Presets, Filter actions)
+    # Compact Small Flat Button
     style.configure(
         "Small.TButton",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text"],
-        bordercolor=COLORS["border_strong"],
-        lightcolor=COLORS["surface_alt"],
-        darkcolor=COLORS["border_strong"],
-        borderwidth=1,
-        relief="solid",
-        padding=(8, 3),
-        font=FONTS["small"],
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        font=SYSTEM_FONT,
+        padding=(6, 3),
     )
     style.map(
         "Small.TButton",
-        background=[
-            ("disabled", COLORS["surface_alt"]),
-            ("pressed", "#e2e8f0"),
-            ("active", "#e2e8f0"),
-        ],
-        foreground=[("disabled", COLORS["text_muted"])],
+        background=[("active", C["surface2"]), ("pressed", C["border"])],
+        foreground=[("disabled", C["fg_dim"])],
+        bordercolor=[("active", C["border"])],
     )
 
-    # Modern Flat Toggle Button (for [Parameters] button)
-    style.configure(
-        "Toolbar.Toolbutton",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface_alt"],
-        darkcolor=COLORS["border"],
-        borderwidth=1,
-        relief="solid",
-        padding=(10, 4),
-        font=FONTS["small_bold"],
-    )
-    style.map(
-        "Toolbar.Toolbutton",
-        background=[
-            ("selected", COLORS["accent_soft"]),
-            ("active", "#e2e8f0"),
-        ],
-        foreground=[
-            ("selected", COLORS["accent_text"]),
-            ("active", COLORS["text"]),
-        ],
-        bordercolor=[
-            ("selected", COLORS["accent"]),
-            ("active", COLORS["border_strong"]),
-        ],
-    )
-
-    # Checkbuttons on white card surface
-    style.configure(
-        "TCheckbutton",
-        background=COLORS["surface"],
-        foreground=COLORS["text"],
-        indicatorcolor=COLORS["surface"],
-        indicatorrelief="solid",
-        padding=(2, 2),
-        font=FONTS["small"],
-    )
-    style.map(
-        "TCheckbutton",
-        background=[("active", COLORS["surface"])],
-        indicatorcolor=[
-            ("selected", COLORS["accent"]),
-            ("active", COLORS["accent_soft"]),
-        ],
-    )
-
-    # Flat Inputs: Entry, Combobox, Spinbox
-    for widget_style in ("TEntry", "TCombobox", "TSpinbox"):
+    # Accent / Primary Button (Emerald — exact AUTO_RENDER Accent.TButton)
+    for btn_style in ("Accent.TButton", "Primary.TButton"):
         style.configure(
-            widget_style,
-            fieldbackground=COLORS["surface"],
-            background=COLORS["surface_alt"],
-            foreground=COLORS["text"],
-            bordercolor=COLORS["border_strong"],
-            lightcolor=COLORS["surface"],
-            darkcolor=COLORS["border_strong"],
-            arrowcolor=COLORS["text_secondary"],
+            btn_style,
+            background=C["green_dim"],
+            foreground="#ffffff",
+            bordercolor=C["green_dim"],
+            lightcolor=C["green_dim"],
+            darkcolor=C["green_dim"],
+            font=SYSTEM_FONT_BOLD,
             padding=(6, 4),
-            relief="solid",
-            borderwidth=1,
-            font=FONTS["small"],
         )
         style.map(
-            widget_style,
-            bordercolor=[("focus", COLORS["accent"]), ("active", "#94a3b8")],
-            fieldbackground=[("readonly", COLORS["surface"])],
+            btn_style,
+            background=[
+                ("disabled", C["border"]),
+                ("active", C["green"]),
+                ("pressed", C["green_dim"]),
+            ],
+            foreground=[("disabled", C["fg_dim"]), ("active", "#ffffff")],
+            bordercolor=[("disabled", C["border"]), ("active", C["green"])],
+            lightcolor=[("disabled", C["border"]), ("active", C["green"])],
+            darkcolor=[("disabled", C["border"]), ("active", C["green"])],
         )
 
-    # Flat Modern Notebook Tabs (mode switcher: Single / Batch)
+    # Info / Blue Emphasized Button (Indigo — matches AUTO_RENDER Info.TButton)
+    style.configure(
+        "Info.TButton",
+        background=C["accent"],
+        foreground="#ffffff",
+        bordercolor=C["accent"],
+        lightcolor=C["accent"],
+        darkcolor=C["accent"],
+        font=SYSTEM_FONT_BOLD,
+        padding=(8, 4),
+    )
+    style.map(
+        "Info.TButton",
+        background=[
+            ("disabled", C["accent_soft"]),
+            ("active", C["accent_hover"]),
+            ("pressed", "#4f46e5"),
+        ],
+        foreground=[("disabled", C["accent_hover"]), ("active", "#ffffff")],
+        bordercolor=[("disabled", C["accent_border"]), ("active", C["accent_hover"])],
+        lightcolor=[("disabled", C["accent_soft"]), ("active", C["accent_hover"])],
+        darkcolor=[("disabled", C["accent_border"]), ("active", C["accent_hover"])],
+    )
+
+    # Danger / Red Button (Solid Rose-500 fill with crisp white text)
+    style.configure(
+        "Danger.TButton",
+        background=C["red"],
+        foreground="#ffffff",
+        bordercolor=C["red"],
+        lightcolor=C["red"],
+        darkcolor=C["red"],
+        font=SYSTEM_FONT_BOLD,
+        padding=(8, 4),
+    )
+    style.map(
+        "Danger.TButton",
+        background=[
+            ("disabled", "#ffe4e6"),
+            ("active", C["danger_hover"]),
+            ("pressed", "#be123c"),
+        ],
+        foreground=[("disabled", "#fb7185"), ("active", "#ffffff")],
+        bordercolor=[("disabled", "#fecdd3"), ("active", C["danger_hover"])],
+        lightcolor=[("disabled", "#ffe4e6"), ("active", C["danger_hover"])],
+        darkcolor=[("disabled", "#fecdd3"), ("active", C["danger_hover"])],
+    )
+
+    # Flat Toggle Button (for [Parameters] toggle — highlights in Indigo like Info.TButton)
+    style.configure(
+        "Toolbar.Toolbutton",
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        font=SYSTEM_FONT_BOLD,
+        padding=(8, 4),
+    )
+    style.map(
+        "Toolbar.Toolbutton",
+        background=[
+            ("selected", C["accent"]),
+            ("active", C["surface2"]),
+        ],
+        foreground=[
+            ("selected", "#ffffff"),
+            ("active", C["fg"]),
+        ],
+        bordercolor=[
+            ("selected", C["accent"]),
+            ("active", C["border"]),
+        ],
+        lightcolor=[
+            ("selected", C["accent"]),
+            ("active", C["surface2"]),
+        ],
+        darkcolor=[
+            ("selected", C["accent"]),
+            ("active", C["surface2"]),
+        ],
+    )
+
+    # ── Radiobutton & Checkbutton ──
+    style.configure(
+        "TRadiobutton",
+        background=C["bg"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+        indicatorcolor=C["border"],
+    )
+    style.map(
+        "TRadiobutton",
+        background=[("active", C["bg"])],
+        indicatorcolor=[("selected", C["accent"])],
+    )
+
+    style.configure(
+        "Card.TRadiobutton",
+        background=C["bg_light"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+        indicatorcolor=C["border"],
+    )
+    style.map(
+        "Card.TRadiobutton",
+        background=[("active", C["bg_light"])],
+        indicatorcolor=[("selected", C["accent"])],
+    )
+
+    style.configure(
+        "TCheckbutton",
+        background=C["bg_light"],
+        foreground=C["fg"],
+        font=SYSTEM_FONT,
+        indicatorcolor=C["border"],
+        padding=(2, 2),
+    )
+    style.map(
+        "TCheckbutton",
+        background=[("active", C["bg_light"])],
+        indicatorcolor=[("selected", C["accent"])],
+    )
+
+    # ── Entry / Spinbox / Combobox (Slate-100 field, Slate-200 border, Indigo focus) ──
+    style.configure(
+        "TEntry",
+        fieldbackground=C["bg_dark"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        insertcolor=C["fg"],
+        font=SYSTEM_FONT,
+        padding=(4, 2),
+    )
+    style.map("TEntry", bordercolor=[("focus", C["accent"])])
+
+    style.configure(
+        "TSpinbox",
+        fieldbackground=C["bg_dark"],
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        arrowcolor=C["fg"],
+        insertcolor=C["fg"],
+        font=SYSTEM_FONT,
+        padding=(4, 2),
+    )
+    style.map("TSpinbox", bordercolor=[("focus", C["accent"])])
+
+    style.configure(
+        "TCombobox",
+        fieldbackground=C["bg_dark"],
+        background=C["border"],
+        foreground=C["fg"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        arrowcolor=C["fg"],
+        font=SYSTEM_FONT,
+        padding=(4, 2),
+    )
+    style.map(
+        "TCombobox",
+        bordercolor=[("focus", C["accent"])],
+        fieldbackground=[("readonly", C["bg_dark"])],
+        selectbackground=[("readonly", C["bg_dark"])],
+        selectforeground=[("readonly", C["fg"])],
+    )
+
+    # ── Notebook (Slate + Indigo tabs) ──
     style.configure(
         "TNotebook",
-        background=COLORS["surface"],
+        background=C["bg"],
+        bordercolor=C["border"],
+        lightcolor=C["bg"],
+        darkcolor=C["border"],
         borderwidth=0,
-        tabmargins=(6, 6, 0, 0),
+        tabmargins=(8, 6, 0, 0),
     )
     style.configure(
         "TNotebook.Tab",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text_secondary"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface_alt"],
-        darkcolor=COLORS["border"],
-        padding=(18, 7),
-        font=FONTS["base_bold"],
+        background=C["border"],
+        foreground=C["fg_sub"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        padding=(12, 5),
+        font=SYSTEM_FONT_BOLD,
     )
     style.map(
         "TNotebook.Tab",
         background=[
-            ("selected", COLORS["surface"]),
-            ("active", "#e2e8f0"),
+            ("selected", C["bg_light"]),
+            ("active", C["surface2"]),
         ],
         foreground=[
-            ("selected", COLORS["accent_text"]),
-            ("active", COLORS["text"]),
+            ("selected", C["accent"]),
+            ("active", C["fg"]),
         ],
         bordercolor=[
-            ("selected", COLORS["accent_border"]),
-            ("active", COLORS["border_strong"]),
+            ("selected", C["border"]),
+            ("active", C["border"]),
+        ],
+        lightcolor=[
+            ("selected", C["bg_light"]),
+            ("active", C["surface2"]),
         ],
         expand=[("selected", [0, 0, 0, 1])],
     )
 
-    # Flat Crisp Treeview (scaled rowheight for large 13-15pt UI text)
+    # ── Treeview (Identical to AUTO_RENDER_GUI) ──
     style.configure(
         "Treeview",
-        background=COLORS["surface"],
-        fieldbackground=COLORS["surface"],
-        foreground=COLORS["text"],
-        borderwidth=0,
-        relief="flat",
-        rowheight=36,
-        font=FONTS["small"],
-    )
-    style.map(
-        "Treeview",
-        background=[("selected", "#dbeafe")],
-        foreground=[("selected", "#1e3a8a")],
+        background=C["bg_dark"],
+        foreground=C["fg"],
+        fieldbackground=C["bg_dark"],
+        bordercolor=C["border"],
+        font=SYSTEM_FONT,
+        rowheight=26,
     )
     style.configure(
         "Treeview.Heading",
-        background=COLORS["surface_alt"],
-        foreground=COLORS["text_secondary"],
-        bordercolor=COLORS["border"],
-        lightcolor=COLORS["surface_alt"],
-        darkcolor=COLORS["border"],
-        relief="flat",
-        padding=(8, 6),
-        font=FONTS["small_bold"],
+        background=C["border"],
+        foreground=C["fg_sub"],
+        bordercolor=C["border"],
+        lightcolor=C["border"],
+        darkcolor=C["border"],
+        font=SYSTEM_FONT_BOLD,
+        padding=(8, 4),
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", C["accent_soft"])],
+        foreground=[("selected", C["accent_text"])],
     )
     style.map(
         "Treeview.Heading",
-        background=[("active", "#e2e8f0")],
-        foreground=[("active", COLORS["text"])],
+        background=[("active", C["surface2"])],
+        foreground=[("active", C["fg"])],
     )
 
-    # Slim Flat Scrollbar
-    style.configure(
-        "Vertical.TScrollbar",
-        background="#cbd5e1",
-        troughcolor=COLORS["surface_alt"],
-        bordercolor=COLORS["surface_alt"],
-        arrowcolor=COLORS["text_secondary"],
-        relief="flat",
-        borderwidth=0,
-        width=14,
-    )
-    style.map(
-        "Vertical.TScrollbar",
-        background=[("active", "#94a3b8"), ("pressed", "#64748b")],
-    )
-    style.configure(
-        "Horizontal.TScrollbar",
-        background="#cbd5e1",
-        troughcolor=COLORS["surface_alt"],
-        bordercolor=COLORS["surface_alt"],
-        arrowcolor=COLORS["text_secondary"],
-        relief="flat",
-        borderwidth=0,
-        width=14,
-    )
-    style.map(
-        "Horizontal.TScrollbar",
-        background=[("active", "#94a3b8"), ("pressed", "#64748b")],
-    )
+    # ── Scrollbar (Identical to AUTO_RENDER_GUI) ──
+    for sb_style in ("TScrollbar", "Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        style.configure(
+            sb_style,
+            background=C["border"],
+            troughcolor=C["bg_dark"],
+            bordercolor=C["bg_dark"],
+            arrowcolor=C["fg_dim"],
+        )
+        style.map(
+            sb_style,
+            background=[("active", C["fg_dim"]), ("pressed", C["fg_sub"])],
+        )
 
-    # Flat Cobalt Progressbar
+    # ── Progressbar (Indigo-500 fill on Slate-200 trough) ──
     style.configure(
         "Horizontal.TProgressbar",
-        background=COLORS["accent"],
-        troughcolor="#e2e8f0",
-        bordercolor="#e2e8f0",
-        lightcolor=COLORS["accent"],
-        darkcolor=COLORS["accent"],
-        thickness=9,
+        background=C["accent"],
+        troughcolor=C["border"],
+        bordercolor=C["border"],
+        lightcolor=C["accent"],
+        darkcolor=C["accent"],
+        thickness=8,
         relief="flat",
         borderwidth=0,
     )
 
-    # PanedWindow & Separator
-    style.configure("TPanedwindow", background=COLORS["app_bg"])
-    style.configure("Sash", sashthickness=5, background=COLORS["app_bg"])
-    style.configure("TSeparator", background=COLORS["border"])
+    # ── PanedWindow & Separator ──
+    style.configure("TPanedwindow", background=C["bg"])
+    style.configure("Sash", sashthickness=5, background=C["bg"])
+    style.configure("TSeparator", background=C["border"])
 
     return style

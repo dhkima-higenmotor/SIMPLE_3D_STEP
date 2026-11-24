@@ -23,11 +23,11 @@ class SettingsDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.title("External 3D Viewer & Preferences")
-        self.configure(background=COLORS["surface"])
+        self.configure(background=COLORS["bg_light"])
         self.transient(parent)
         self.grab_set()
         self.resizable(True, False)
-        self.minsize(720, 340)
+        self.minsize(560, 260)
 
         self._config = config
         self._config_path = config_path
@@ -81,7 +81,7 @@ class SettingsDialog(tk.Toplevel):
 
         info_box = tk.Frame(
             container,
-            background=COLORS["surface_alt"],
+            background=COLORS["bg_dark"],
             highlightbackground=COLORS["border"],
             highlightthickness=1,
             padx=10,
@@ -97,12 +97,12 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(
             info_box,
             text=help_text,
-            background=COLORS["surface_alt"],
-            foreground=COLORS["text_secondary"],
+            background=COLORS["bg_dark"],
+            foreground=COLORS["fg_sub"],
             font=FONTS["small"],
             justify=tk.LEFT,
             anchor=tk.W,
-            wraplength=660,
+            wraplength=500,
         ).pack(fill=tk.X)
 
         btn_frame = ttk.Frame(container, style="Card.TFrame")

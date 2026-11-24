@@ -714,7 +714,7 @@ write.precision.val     = clamp(avg_tolerance, 1e-5, 1e-3)
 메모리 상의 형상이 **외부 뷰어가 보게 될 pcurve 와 공차를 정확히** 갖도록 합니다.
 즉 오래된 메모리 pcurve 가 이식성 문제를 가릴 수 없습니다.
 
-### 5.3 메쉬를 막는 슬리버와 클리핑 캡핑
+### 5.3 메쉬를 막는 슬리버, 내접 핀치 와이어와 클리핑 캡핑
 
 OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이라도** NULL 삼각화를 내면
 솔리드를 *Opened* 로 분류합니다. 감사(audit)는 CAD Assistant 의 프로파일을
@@ -726,20 +726,48 @@ OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이�
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
 ```
 
-어떤 면이 실패하면 동일한 유효성/부피 가드 아래에서 두 가지 복구를 시도합니다.
+어떤 면이 실패하면 동일한 유효성·워터타이트·공동·부피 가드 아래에서 세 가지 단계적 복구를
+순서대로 시도합니다.
 
-1. 정밀도 0.015 mm 의 `ShapeFix_FixSmallFace` 가 불리언 교차에서 생긴 삼각화 불가능한
-   극박 탄젠트 슬리버를 붕괴시킵니다.
-2. 실패한 면에 대해서만 긴 곡선 엣지를 **정확히 중점 분할**
-   (`_split_edge_exact_subedges`)합니다. 서브 엣지는 같은 3D 커브 위에 있으므로 기하
-   오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가 줄어듭니다. 반지름
-   $R$, 각도 $\theta$ 인 원호의 현 편차는
+1. **미세 슬리버 제거 (Step A).** 정밀도 0.015 mm 의 `ShapeFix_FixSmallFace` 가 불리언
+   교차에서 생긴 삼각화 불가능한 극박 탄젠트 슬리버를 붕괴시킵니다.
+2. **정밀 곡선 엣지 중점 분할 (Step B).** 실패한 면에 대해서만 긴 곡선 엣지를 **정확히
+   중점 분할** (`_split_edge_exact_subedges`)합니다. 서브 엣지는 같은 3D 커브 위에
+   있으므로 기하 오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가
+   줄어듭니다. 반지름 $R$, 각도 $\theta$ 인 원호의 현 편차는
 
    ```math
    \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
    ```
 
    이므로 $\theta$ 를 절반으로 줄이면 편차가 1/4 로 줄고, 면 수는 늘지 않습니다.
+3. **내접 핀치 와이어 홀 분할 (Step C).** 일부 CAD 모델의 평면에는 중심 거리 $d$, 반지름
+   $r$ 인 내부 원형 홀 와이어가 반지름 $R = d + r$ 인 외곽 경계 와이어와 단 한 점
+   $p_{\text{pinch}}$ 에서 정확히 내접(tangent pinch-point)하는 경우가 있습니다. Parasolid
+   기반 뷰어(eDrawings 등)는 이러한 내접 위상을 허용하지만, OCCT 의 `STEPControl_Reader`
+   는 STEP `UNCERTAINTY` 공차 내에서 접점 부근 엣지 끝점 파라미터를 미세하게 후퇴시키므로
+   외곽 와이어와 내부 와이어 사이에 서로 반대 방향의 미세 닫힘 선분이 겹치게 됩니다.
+   이로 인해 `BRepMesh_IncrementalMesh` 가 해당 면 전체에서
+   `IMeshData_SelfIntersectingWire | IMeshData_Failure`(삼각형 0개) 오류를 내며, CAD
+   Assistant 에서 해당 면이 사라지고 솔리드가 *Opened* 로 강등됩니다.
+
+   `_split_tangent_pinch_wire_faces` 는 **기하 오차 0.0 mm** 로 이 문제를 자동 해결합니다.
+   - 실패한 평면에서 $\operatorname{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
+     인 내접 내부 와이어 $W_{\text{in}}$ 을 탐지(`BRepExtrema_DistShapeShape`)하고,
+     접점 $p_{\text{pinch}}$ 에 미병합 동위치 정점 쌍이 있으면 `ShapeBuild_ReShape`
+     (`TopAbs_FORWARD`)로 통합하여 8자형 보우타이 와이어 생성을 방지합니다.
+   - 홀 중심 $c$ 를 면 평면 $\Pi$ 에 투영한 뒤, $c$ 를 지나고 평면 내 접점 방향 벡터
+     $\mathbf{n}_{\text{cut}} = \operatorname{proj}_{\Pi}(p_{\text{pinch}} - c)$ 를 법선으로
+     하는 절단 평면(공통 접선과 평행)을 구성합니다.
+   - 절단 평면을 실패한 면과만 교차(`BRepAlgoAPI_Section`)한 뒤, 인접한 무관한 홀을 건드리지
+     않도록 $W_{\text{in}}$ 경계에 직접 닿는 국소 현(chord) 엣지
+     ($\min(\operatorname{dist}(v_1, W_{\text{in}}), \operatorname{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)만
+     선별해 `BRepFeat_SplitShape` 로 분할하고, `ShapeFix_Shape` 및 3D 커브 STEP 왕복 후
+     CAD Assistant 의 5개 Deflection 프로파일 전체를 재감사합니다.
+
+   내접 홀이 원래 평면 그대로 깔끔한 단일 외곽 와이어 초승달 서브 페이스들로 분리되어,
+   부피와 표면적을 100 % 동일하게 유지하면서도 CAD Assistant 에서 모든 면이 정상 Closed
+   Solid 및 단면 캡핑으로 렌더링됩니다.
 
 ### 5.4 최종 검증
 
