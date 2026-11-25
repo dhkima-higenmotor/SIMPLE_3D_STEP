@@ -781,8 +781,59 @@ def load_pcb_assembly(
     component_entries: list[tuple[str, TDF_Label, TopLoc_Location, Optional[RGBColor]]] = []
     was_flat = False
 
+    _WRAPPER_ASM_NAMES = {"free-models", "free_models", "freemodels"}
+    _BOARD_TOKEN_HINTS = ("board", "pcb", "pwb", "fr4", "substrate")
+
+    def _deref_label_and_name(lbl: TDF_Label) -> tuple[TDF_Label, str]:
+        nm = _get_label_name(lbl)
+        if XCAFDoc_ShapeTool.IsReference_s(lbl):
+            r = TDF_Label()
+            if XCAFDoc_ShapeTool.GetReferredShape_s(lbl, r):
+                rnm = _get_label_name(r)
+                return r, (rnm if _is_meaningful_step_name(rnm) else nm)
+        return lbl, nm
+
+    def _is_nested_pcb_subassembly(ref_lbl: TDF_Label, depth: int = 0) -> bool:
+        """Return True if an assembly label is a nested PCB container (or wrapper like Free-Models
+        around one or more nested PCB sub-assemblies), rather than a single multi-body component."""
+        if depth > 10 or not XCAFDoc_ShapeTool.IsAssembly_s(ref_lbl):
+            return False
+        kids = TDF_LabelSequence()
+        XCAFDoc_ShapeTool.GetComponents_s(ref_lbl, kids)
+        n_kids = kids.Length()
+        if n_kids == 0:
+            return False
+
+        # Single-child wrapper (e.g. Altium 'Free-Models' containing 1 nested PCB assembly such as
+        # GateDriver_PCB -> Free-Models -> Power_PCB): unwrap only if the child is a PCB container!
+        if n_kids == 1:
+            kref, _kname = _deref_label_and_name(kids.Value(1))
+            return _is_nested_pcb_subassembly(kref, depth + 1)
+
+        has_board_kid = False
+        has_nested_pcb_kid = False
+        for k in range(1, n_kids + 1):
+            kref, kname = _deref_label_and_name(kids.Value(k))
+            low = (kname or "").lower()
+            if low and any(tok in low for tok in _BOARD_TOKEN_HINTS):
+                # Board child is a thin slab part/1-child assembly (not an IC named "BoardCon")
+                if not XCAFDoc_ShapeTool.IsAssembly_s(kref):
+                    has_board_kid = True
+                else:
+                    gk = TDF_LabelSequence()
+                    XCAFDoc_ShapeTool.GetComponents_s(kref, gk)
+                    if gk.Length() <= 2:
+                        has_board_kid = True
+            if _is_nested_pcb_subassembly(kref, depth + 1):
+                has_nested_pcb_kid = True
+
+        return has_board_kid or has_nested_pcb_kid
+
     def _resolve_root_entries(
-        lbl: TDF_Label, loc: TopLoc_Location, inh_color: Optional[RGBColor]
+        lbl: TDF_Label,
+        loc: TopLoc_Location,
+        inh_color: Optional[RGBColor],
+        asm_prefix: str = "",
     ) -> list[tuple[str, TDF_Label, TopLoc_Location, Optional[RGBColor]]]:
         nonlocal root_name
         c_col = _extract_label_color(lbl) or inh_color
@@ -790,11 +841,11 @@ def load_pcb_assembly(
             ref = TDF_Label()
             if XCAFDoc_ShapeTool.GetReferredShape_s(lbl, ref):
                 inst_loc = XCAFDoc_ShapeTool.GetLocation_s(lbl)
-                return _resolve_root_entries(ref, loc.Multiplied(inst_loc), c_col)
+                return _resolve_root_entries(ref, loc.Multiplied(inst_loc), c_col, asm_prefix)
 
         if XCAFDoc_ShapeTool.IsAssembly_s(lbl):
             nm = _get_label_name(lbl)
-            if nm:
+            if nm and not asm_prefix:
                 root_name = nm
             comps = TDF_LabelSequence()
             XCAFDoc_ShapeTool.GetComponents_s(lbl, comps)
@@ -804,25 +855,68 @@ def load_pcb_assembly(
                 child_ref = child
                 child_loc = loc
                 child_col = _extract_label_color(child) or c_col
+                child_name = _get_label_name(child)
                 if XCAFDoc_ShapeTool.IsReference_s(child):
                     ref = TDF_Label()
                     if XCAFDoc_ShapeTool.GetReferredShape_s(child, ref):
                         child_ref = ref
                         child_loc = loc.Multiplied(XCAFDoc_ShapeTool.GetLocation_s(child))
                         child_col = _extract_label_color(ref) or child_col
+                        rnm = _get_label_name(ref)
+                        if _is_meaningful_step_name(rnm):
+                            child_name = rnm
                 if XCAFDoc_ShapeTool.IsAssembly_s(child_ref):
-                    return _resolve_root_entries(child_ref, child_loc, child_col)
+                    next_pref = asm_prefix
+                    if (
+                        _is_meaningful_step_name(child_name)
+                        and child_name.strip().lower() not in _WRAPPER_ASM_NAMES
+                        and _is_nested_pcb_subassembly(child_ref)
+                    ):
+                        next_pref = child_name.strip()
+                    return _resolve_root_entries(child_ref, child_loc, child_col, next_pref)
 
             entries: list[tuple[str, TDF_Label, TopLoc_Location, Optional[RGBColor]]] = []
             for i in range(1, comps.Length() + 1):
                 comp = comps.Value(i)
+                child_ref = comp
+                child_loc = loc
+                child_col = _extract_label_color(comp) or c_col
+                child_name = _get_label_name(comp)
+                if XCAFDoc_ShapeTool.IsReference_s(comp):
+                    ref = TDF_Label()
+                    if XCAFDoc_ShapeTool.GetReferredShape_s(comp, ref):
+                        child_ref = ref
+                        child_loc = loc.Multiplied(XCAFDoc_ShapeTool.GetLocation_s(comp))
+                        child_col = _extract_label_color(ref) or child_col
+                        ref_nm = _get_label_name(ref)
+                        if _is_meaningful_step_name(ref_nm):
+                            child_name = ref_nm
+
+                # Recursively flatten nested multi-PCB sub-assemblies (including single-child
+                # Free-Models wrappers) while using the immediate PCB name as clean prefix.
+                if _is_nested_pcb_subassembly(child_ref):
+                    clean_sub = child_name.strip() if _is_meaningful_step_name(child_name) else ""
+                    if clean_sub and clean_sub.lower() not in _WRAPPER_ASM_NAMES:
+                        next_pref = clean_sub
+                    else:
+                        next_pref = asm_prefix
+                    entries.extend(_resolve_root_entries(child_ref, child_loc, child_col, next_pref))
+                    continue
+
                 display_name, _ref_des, _leaf_name = _extract_component_refdes_and_leaf(
                     comp, f"Component_{i}"
                 )
+                # Strip generic Altium 'Free-Models_' prefix when a leaf part sits directly inside it
+                if display_name.lower().startswith("free-models_") and len(display_name) > len("free-models_"):
+                    display_name = display_name[len("free-models_"):]
+                if asm_prefix and asm_prefix.lower() not in display_name.lower():
+                    display_name = f"{asm_prefix}_{display_name}"
                 entries.append((display_name, comp, loc, c_col))
             return entries
 
         nm = _get_label_name(lbl) or root_name
+        if asm_prefix and asm_prefix.lower() not in nm.lower():
+            nm = f"{asm_prefix}_{nm}"
         return [(nm, lbl, loc, c_col)]
 
     identity = TopLoc_Location()
@@ -864,6 +958,13 @@ def load_pcb_assembly(
                 comp_loc = cloc.Multiplied(XCAFDoc_ShapeTool.GetLocation_s(clbl))
             rot_deg = _extract_xy_rotation_deg(comp_loc)
             display_name, ref_des, leaf_name = _extract_component_refdes_and_leaf(clbl, cname)
+            # Preserve any parent multi-PCB sub-assembly prefix / cleaned Free-Models name in cname
+            if cname:
+                if cname != display_name and (
+                    display_name.lower() in cname.lower()
+                    or display_name.lower().startswith("free-models_")
+                ):
+                    display_name = cname
             bodies = []
             _collect_bodies(clbl, cloc, ccol, bodies, display_name)
             if not bodies:
@@ -999,28 +1100,49 @@ def save_colored_assembly_to_step(
             color_tool.SetColor(lbl, qcol, XCAFDoc_ColorGen)
             color_tool.SetColor(lbl, qcol, XCAFDoc_ColorSurf)
 
-    for idx, part in enumerate(parts, start=1):
-        clean_name = (part.name or f"Part_{idx}").strip()
-        ref_title = (part.ref_des or "").strip() or clean_name
+    def _compose_flat_name(part: PcbSimplifiedPart, index: int) -> str:
+        """Build a clean single-level part name reflecting sub-assembly + child part (or IDF name)."""
+        clean_name = (part.name or "").strip()
+        ref_title = (part.ref_des or "").strip()
         leaf_title = (part.leaf_name or "").strip()
-        use_two_level = bool(leaf_title) and (leaf_title.lower() != ref_title.lower())
 
-        # Resolve (proto_label, comp_loc) either from shared prototype cache or unique solid
+        # When part.name already carries a composed/IDF name that differs from bare ref_des/leaf,
+        # prefer it directly; otherwise combine sub-assembly (ref_des) and child part (leaf_name).
+        if clean_name and (
+            not ref_title
+            or not leaf_title
+            or (ref_title.lower() in clean_name.lower() and leaf_title.lower() in clean_name.lower())
+        ):
+            return clean_name
+        if ref_title and leaf_title:
+            if ref_title.lower() == leaf_title.lower() or ref_title.lower() in leaf_title.lower():
+                return leaf_title
+            if leaf_title.lower() in ref_title.lower():
+                return ref_title
+            return f"{ref_title}_{leaf_title}"
+        return clean_name or ref_title or leaf_title or f"Part_{index}"
+
+    for idx, part in enumerate(parts, start=1):
+        flat_name = _compose_flat_name(part, idx)
+
+        # Flat 1-level export (NO sub-assemblies): every component sits directly under root_label
+        # with both its PRODUCT label and occurrence label set to flat_name so SolidWorks,
+        # CAD Assistant, and all STEP viewers display the exact combined / IDF part name.
         if (
             part.proto_key is not None
             and part.proto_shape is not None
             and not part.proto_shape.IsNull()
             and part.placement_trsf is not None
         ):
-            proto_label = proto_cache.get(part.proto_key)
+            named_proto_key = (flat_name, part.proto_key)
+            proto_label = proto_cache.get(named_proto_key)
             if proto_label is None:
                 proto_sh = _unwrap_single_solid(part.proto_shape)
                 _inspect_shape_precision(proto_sh)
                 proto_label = shape_tool.AddShape(proto_sh, False)
-                proto_name = leaf_title or clean_name or f"{part.proto_key[0]}_{len(proto_cache) + 1}"
-                TDataStd_Name.Set_s(proto_label, TCollection_ExtendedString(proto_name))
+                TDataStd_Name.Set_s(proto_label, TCollection_ExtendedString(flat_name))
                 _apply_color(proto_label, part.color)
-                proto_cache[part.proto_key] = proto_label
+                proto_cache[named_proto_key] = proto_label
             comp_loc = TopLoc_Location(part.placement_trsf)
         else:
             sh = part.shape
@@ -1037,21 +1159,11 @@ def save_colored_assembly_to_step(
 
             _inspect_shape_precision(sh_proto)
             proto_label = shape_tool.AddShape(sh_proto, False)
-            proto_name = leaf_title if use_two_level else ref_title
-            TDataStd_Name.Set_s(proto_label, TCollection_ExtendedString(proto_name))
+            TDataStd_Name.Set_s(proto_label, TCollection_ExtendedString(flat_name))
             _apply_color(proto_label, part.color)
 
-        if use_two_level:
-            # Altium-native 2-level hierarchy: Root -> RefDes (component designator) -> Leaf Part Name
-            comp_asm = shape_tool.NewShape()
-            TDataStd_Name.Set_s(comp_asm, TCollection_ExtendedString(ref_title))
-            leaf_occ = shape_tool.AddComponent(comp_asm, proto_label, comp_loc)
-            TDataStd_Name.Set_s(leaf_occ, TCollection_ExtendedString(leaf_title))
-            comp_occ = shape_tool.AddComponent(root_label, comp_asm, identity)
-            TDataStd_Name.Set_s(comp_occ, TCollection_ExtendedString(ref_title))
-        else:
-            comp_occ = shape_tool.AddComponent(root_label, proto_label, comp_loc)
-            TDataStd_Name.Set_s(comp_occ, TCollection_ExtendedString(ref_title))
+        comp_occ = shape_tool.AddComponent(root_label, proto_label, comp_loc)
+        TDataStd_Name.Set_s(comp_occ, TCollection_ExtendedString(flat_name))
 
     shape_tool.UpdateAssemblies()
 

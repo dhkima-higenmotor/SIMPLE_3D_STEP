@@ -19,6 +19,10 @@ from simple_3d_step.config import (
     get_default_config_path,
     launch_external_viewer,
     load_config,
+    remember_last_open_dir,
+    remember_last_save_dir,
+    resolve_last_open_dir,
+    resolve_last_save_dir,
     save_config,
 )
 from simple_3d_step.core.worker import CadWorkerClient
@@ -727,9 +731,7 @@ class Simple3DStepApp(tk.Tk):
     def _on_open_step(self) -> None:
         if self._busy:
             return
-        init_dir = self._config.last_open_dir or str(Path.cwd())
-        if not Path(init_dir).exists():
-            init_dir = str(Path.cwd())
+        init_dir = resolve_last_open_dir(self._config_path, fallback=self._config.last_open_dir)
         selected = filedialog.askopenfilename(
             parent=self,
             title="Open 3D STEP File",
@@ -738,11 +740,11 @@ class Simple3DStepApp(tk.Tk):
         )
         if selected:
             path = Path(selected)
-            self._config.last_open_dir = str(path.parent)
-            save_config(self._config, self._config_path)
             self._load_step_file(path)
 
     def _load_step_file(self, path: Path) -> None:
+        self._config.last_open_dir = remember_last_open_dir(path, self._config_path)
+
         def _done(data: dict[str, Any]) -> None:
             src = Path(data["source_path"])
             asm = AssemblyModel(
@@ -777,12 +779,27 @@ class Simple3DStepApp(tk.Tk):
             step_key="open",
         )
 
+    def _persist_config_preserving_shared(self) -> None:
+        """Persist Single Mode settings without clobbering last_open_dir, last_save_dir,
+        or PCB/Batch settings updated by other tabs during the session."""
+        if self._config_path.is_file():
+            disk_cfg = load_config(self._config_path)
+            if disk_cfg.last_open_dir:
+                self._config.last_open_dir = disk_cfg.last_open_dir
+            if disk_cfg.last_save_dir:
+                self._config.last_save_dir = disk_cfg.last_save_dir
+            # Preserve any PCB Mode parameters saved via PcbPanel
+            for fld in AppConfig.__dataclass_fields__:
+                if fld.startswith("pcb_"):
+                    setattr(self._config, fld, getattr(disk_cfg, fld))
+        self._control_panel.sync_to_app_config(self._config)
+        save_config(self._config, self._config_path)
+
     def _on_analyze(self) -> None:
         if self._assembly is None or self._busy:
             return
         vis_cfg = self._control_panel.build_visibility_config()
-        self._control_panel.sync_to_app_config(self._config)
-        save_config(self._config, self._config_path)
+        self._persist_config_preserving_shared()
 
         def _done(data: dict[str, Any]) -> None:
             if self._assembly is not None:
@@ -812,8 +829,7 @@ class Simple3DStepApp(tk.Tk):
             return
 
         simp_cfg = self._control_panel.build_simplify_config()
-        self._control_panel.sync_to_app_config(self._config)
-        save_config(self._config, self._config_path)
+        self._persist_config_preserving_shared()
 
         def _done(res: SimplifyResult) -> None:
             self._result = res
@@ -845,7 +861,9 @@ class Simple3DStepApp(tk.Tk):
     def _on_save_result(self) -> None:
         if self._result is None or self._busy or self._assembly is None:
             return
-        init_dir = str(self._assembly.source_path.parent)
+        init_dir = resolve_last_save_dir(
+            self._config_path, fallback=str(self._assembly.source_path.parent)
+        )
         default_name = f"{self._assembly.source_path.stem}_simplified.step"
         selected = filedialog.asksaveasfilename(
             parent=self,
@@ -859,8 +877,7 @@ class Simple3DStepApp(tk.Tk):
             return
 
         out_path = Path(selected)
-        self._config.last_save_dir = str(out_path.parent)
-        save_config(self._config, self._config_path)
+        self._config.last_save_dir = remember_last_save_dir(out_path, self._config_path)
         schema = self._control_panel.build_simplify_config().step_schema
 
         def _done(data: dict[str, Any]) -> None:
@@ -970,8 +987,7 @@ class Simple3DStepApp(tk.Tk):
                 pass
             self._poll_after_id = None
         self._busy_banner.stop()
-        self._control_panel.sync_to_app_config(self._config)
-        save_config(self._config, self._config_path)
+        self._persist_config_preserving_shared()
         self._worker.shutdown()
         self._batch_panel.shutdown()
         self._pcb_panel.shutdown()

@@ -789,6 +789,21 @@ def build_idf_box_proto_and_trsf(
     return proto, trsf
 
 
+def _format_idf_part_name(ref_des: str, package_name: str, fallback: str = "") -> str:
+    """Format a clean component name from IDF RefDes and Package name without duplication."""
+    ref = (ref_des or "").strip()
+    pkg = (package_name or "").strip()
+    if ref.upper() == "NOREFDES":
+        ref = ""
+    if ref and pkg:
+        if ref.lower() == pkg.lower() or _refdes_matches_name(ref, pkg):
+            return pkg
+        if _refdes_matches_name(pkg, ref):
+            return ref
+        return f"{ref}_{pkg}"
+    return ref or pkg or fallback
+
+
 def supplement_missing_idf_parts(
     idf: IdfBoardData,
     board_bbox_min: np.ndarray,
@@ -852,10 +867,9 @@ def supplement_missing_idf_parts(
 
         if matched_idx is not None:
             matched_count += 1
-            ref = pl.ref_des.strip()
-            pkg = pl.package_name.strip()
-            if ref and ref.upper() != "NOREFDES" and matched_idx not in matched_names:
-                matched_names[matched_idx] = f"{ref}_{pkg}" if pkg else ref
+            idf_name = _format_idf_part_name(pl.ref_des, pl.package_name)
+            if idf_name and matched_idx not in matched_names:
+                matched_names[matched_idx] = idf_name
             continue
 
         if _is_zero_height_non_component(pl, fp):
@@ -877,10 +891,7 @@ def supplement_missing_idf_parts(
 
         ref = pl.ref_des.strip()
         pkg = pl.package_name.strip()
-        if ref and ref.upper() != "NOREFDES":
-            comp_name = f"{ref}_{pkg}" if pkg else ref
-        else:
-            comp_name = pkg or f"IDF_Part_{len(added) + 1}"
+        comp_name = _format_idf_part_name(ref, pkg, fallback=f"IDF_Part_{len(added) + 1}")
 
         added.append(
             PcbSimplifiedPart(

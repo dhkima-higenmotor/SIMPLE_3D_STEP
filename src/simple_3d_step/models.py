@@ -164,9 +164,11 @@ class PcbSimplifyConfig:
 
     simplify_leads: bool = True            # Group multi-lead/pin arrays into simple boxes
     detect_cylinders: bool = True          # Simplify cylindrical parts (e.g. electrolytic caps) as cylinders
+    detect_hex_posts: bool = True          # Simplify hexagonal standoffs/posts as hex prisms (keeping screw holes)
     cylinder_circularity_min: float = 0.80 # Minimum circularity / cylindrical ratio to classify as cylinder
     remove_text_features: bool = True      # Drop engraved/embossed text & logo solids/features
-    small_part_box_mm: float = 4.0         # Collapse compact parts <= this max dimension directly to 1 OBB box
+    small_part_box_mm: float = 4.0         # Collapse compact box-like parts <= this max dimension directly to 1 OBB box
+    preserve_simple_max_faces: int = 55    # Keep & fuse low-complexity non-box parts <= this face count (0 = off)
     preserve_colors: bool = True           # Preserve representative main-body RGB color per component
     use_idf_supplement: bool = True        # Supplement STEP-missing parts from IDF (.bdf/.ldf) as boxes
     keep_board_holes: bool = True          # Preserve PCB board outline & mounting holes
@@ -209,6 +211,7 @@ class PcbComponentGroup:
     leaf_name: str = ""
     rotation_xy_deg: Optional[float] = None  # Component XY placement angle from XCAF transform
     is_board: bool = False
+    is_heatsink: bool = False
     color: Optional[RGBColor] = None
 
     @property
@@ -264,7 +267,7 @@ class PcbSimplifiedPart:
     name: str
     shape: Any  # Single TopoDS_Shape (world coordinates; 1 watertight solid per component)
     color: Optional[RGBColor] = None
-    category: str = "box"  # "board" | "cylinder" | "ic_fused" | "connector_fused" | "box" | "idf_box"
+    category: str = "box"  # "board" | "heatsink" | "preserved" | "hex_post" | "cylinder" | "ic_fused" | "connector_fused" | "box" | "idf_box"
     ref_des: str = ""
     leaf_name: str = ""
     original_bodies: int = 1
@@ -285,7 +288,10 @@ class PcbSimplifyResult:
     root_name: str = "PCB_Simplified"
     unit: str = "MM"
     board_count: int = 0
+    heatsink_count: int = 0
     component_count: int = 0
+    preserved_count: int = 0
+    hex_post_count: int = 0
     cylinder_count: int = 0
     fused_count: int = 0
     box_count: int = 0

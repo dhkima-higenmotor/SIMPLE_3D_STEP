@@ -25,7 +25,10 @@ from simple_3d_step.config import (
     get_default_config_path,
     launch_external_viewer,
     load_config,
+    remember_last_open_dir,
+    remember_last_save_dir,
     resolve_batch_workers,
+    resolve_last_open_dir,
     save_config,
     threads_per_batch_worker,
 )
@@ -71,9 +74,11 @@ def build_pcb_simplify_config(cfg: AppConfig) -> PcbSimplifyConfig:
     return PcbSimplifyConfig(
         simplify_leads=bool(cfg.pcb_simplify_leads),
         detect_cylinders=bool(cfg.pcb_detect_cylinders),
+        detect_hex_posts=bool(cfg.pcb_detect_hex_posts),
         cylinder_circularity_min=max(0.50, min(0.98, float(cfg.pcb_cylinder_circularity_min))),
         remove_text_features=bool(cfg.pcb_remove_text_features),
         small_part_box_mm=max(0.0, float(cfg.pcb_small_part_box_mm)),
+        preserve_simple_max_faces=max(0, int(cfg.pcb_preserve_simple_max_faces)),
         preserve_colors=bool(cfg.pcb_preserve_colors),
         use_idf_supplement=bool(cfg.pcb_use_idf_supplement),
         keep_board_holes=bool(cfg.pcb_keep_board_holes),
@@ -143,6 +148,9 @@ class PcbPanel(tk.Frame):
         self._hole_limit_var = tk.StringVar(value=f"{self._config.pcb_min_board_hole_mm:g}")
         self._exclude_small_var = tk.StringVar(value=f"{self._config.pcb_exclude_small_part_mm:g}")
         self._min_bright_var = tk.StringVar(value=f"{self._config.pcb_min_color_brightness:.2f}")
+        self._keep_simple_var = tk.StringVar(
+            value=f"{max(0, int(self._config.pcb_preserve_simple_max_faces))}"
+        )
 
         self._items: list[PcbBatchItem] = []
         self._slots: list[_PcbWorkerSlot] = []
@@ -509,9 +517,38 @@ class PcbPanel(tk.Frame):
             anchor=tk.W,
             justify=tk.LEFT,
             wraplength=255,
-        ).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(0, 5))
 
-        for spin in (self._spin_hole_limit, self._spin_exclude_small, self._spin_min_bright):
+        ttk.Label(sec, text="Keep Simple ≤ (faces):", style="Card.TLabel").grid(
+            row=6, column=0, sticky=tk.W, pady=(0, 1)
+        )
+        self._spin_keep_simple = ttk.Spinbox(
+            sec,
+            from_=0,
+            to=200,
+            increment=5,
+            textvariable=self._keep_simple_var,
+            width=6,
+            command=self._on_param_input_changed,
+        )
+        self._spin_keep_simple.grid(row=6, column=1, sticky=tk.E, pady=(0, 1))
+        tk.Label(
+            sec,
+            text="Keep & fuse low-face non-box parts as-is (0 = off).",
+            background=COLORS["surface"],
+            foreground=COLORS["text_muted"],
+            font=FONTS["small"],
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=255,
+        ).grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
+
+        for spin in (
+            self._spin_hole_limit,
+            self._spin_exclude_small,
+            self._spin_min_bright,
+            self._spin_keep_simple,
+        ):
             spin.bind("<FocusOut>", lambda _e: self._on_param_input_changed())
             spin.bind("<Return>", lambda _e: self._on_param_input_changed())
 
@@ -557,7 +594,8 @@ class PcbPanel(tk.Frame):
             f"Saved PCB parameters to {self._config_path.name} "
             f"(hole<{self._pcb_cfg.min_board_hole_mm:g}mm · "
             f"exclude<={self._pcb_cfg.exclude_small_part_mm:g}mm · "
-            f"minL={self._pcb_cfg.min_color_brightness:.2f})"
+            f"minL={self._pcb_cfg.min_color_brightness:.2f} · "
+            f"keepSimple<={self._pcb_cfg.preserve_simple_max_faces}f)"
         )
 
     # ------------------------------------------------------------------
@@ -655,6 +693,7 @@ class PcbPanel(tk.Frame):
         self._spin_hole_limit.configure(state=spin_state)
         self._spin_exclude_small.configure(state=spin_state)
         self._spin_min_bright.configure(state=spin_state)
+        self._spin_keep_simple.configure(state=spin_state)
         self._btn_save_params.configure(state=spin_state)
 
     @staticmethod
@@ -665,6 +704,16 @@ class PcbPanel(tk.Frame):
             return default
         if val < 0.0:
             return 0.0
+        return min(upper, val)
+
+    @staticmethod
+    def _parse_nonneg_int(raw: str, default: int, upper: int) -> int:
+        try:
+            val = int(round(float(str(raw).strip())))
+        except (TypeError, ValueError):
+            return default
+        if val < 0:
+            return 0
         return min(upper, val)
 
     def _sync_controls_to_config(self) -> None:
@@ -678,12 +727,17 @@ class PcbPanel(tk.Frame):
         bright = self._parse_nonneg_float(
             self._min_bright_var.get(), self._config.pcb_min_color_brightness, 0.85
         )
+        keep_simple = self._parse_nonneg_int(
+            self._keep_simple_var.get(), self._config.pcb_preserve_simple_max_faces, 500
+        )
         self._config.pcb_min_board_hole_mm = hole
         self._config.pcb_exclude_small_part_mm = excl
         self._config.pcb_min_color_brightness = bright
+        self._config.pcb_preserve_simple_max_faces = keep_simple
         self._hole_limit_var.set(f"{hole:g}")
         self._exclude_small_var.set(f"{excl:g}")
         self._min_bright_var.set(f"{bright:.2f}")
+        self._keep_simple_var.set(f"{keep_simple}")
 
     def _sync_config_to_controls(self) -> None:
         """Push self._config values into the GUI PCB spinboxes."""
@@ -691,6 +745,9 @@ class PcbPanel(tk.Frame):
         self._exclude_small_var.set(f"{max(0.0, float(self._config.pcb_exclude_small_part_mm)):g}")
         self._min_bright_var.set(
             f"{max(0.0, min(0.85, float(self._config.pcb_min_color_brightness))):.2f}"
+        )
+        self._keep_simple_var.set(
+            f"{max(0, int(self._config.pcb_preserve_simple_max_faces))}"
         )
 
     def _refresh_config_summary(self) -> None:
@@ -703,16 +760,18 @@ class PcbPanel(tk.Frame):
         excl_lbl = f"≤{c.pcb_exclude_small_part_mm:g} mm" if c.pcb_exclude_small_part_mm > 0 else "off"
         hole_lbl = f"<{c.pcb_min_board_hole_mm:g} mm" if c.pcb_min_board_hole_mm > 0 else "keep all"
         bright_lbl = f"{c.pcb_min_color_brightness:.2f}" if c.pcb_min_color_brightness > 0 else "off"
+        keep_lbl = f"≤{int(c.pcb_preserve_simple_max_faces)}f" if int(c.pcb_preserve_simple_max_faces) > 0 else "off"
         self._param_var1.set(
             f"Parameters:  workers={worker_lbl}  ·  schema={schema}  ·  "
             f"delete holes {hole_lbl}  ·  exclude parts {excl_lbl}  ·  min brightness={bright_lbl}"
         )
         self._param_var2.set(
             f"Colors={'keep' if c.pcb_preserve_colors else 'off'}  ·  "
+            f"keep simple={keep_lbl}  ·  "
+            f"hex posts={'on' if c.pcb_detect_hex_posts else 'off'}  ·  "
             f"cylinders={'on' if c.pcb_detect_cylinders else 'off'}  ·  "
             f"lead boxes={'on' if c.pcb_simplify_leads else 'off'}  ·  "
-            f"text removal={'on' if c.pcb_remove_text_features else 'off'}  ·  "
-            f"IDF supplement={'on' if c.pcb_use_idf_supplement else 'off'}"
+            f"IDF={'on' if c.pcb_use_idf_supplement else 'off'}"
         )
 
     # ------------------------------------------------------------------
@@ -758,6 +817,9 @@ class PcbPanel(tk.Frame):
             added += 1
 
         if added:
+            self._config.last_open_dir = remember_last_open_dir(
+                self._items[-1].path, self._config_path
+            )
             start = len(self._items) - added
             self._refresh_tree(selected=range(start, len(self._items)))
             idf_note = f" ({idf_linked} auto-linked with IDF)" if idf_linked else ""
@@ -773,9 +835,7 @@ class PcbPanel(tk.Frame):
     def add_files_dialog(self) -> None:
         if self._running:
             return
-        init_dir = self._config.last_open_dir
-        if not init_dir or not Path(init_dir).is_dir():
-            init_dir = str(Path.cwd())
+        init_dir = resolve_last_open_dir(self._config_path, fallback=self._config.last_open_dir)
         selected = filedialog.askopenfilenames(
             parent=self,
             title="Select PCB STEP Files",
@@ -1252,6 +1312,7 @@ class PcbPanel(tk.Frame):
 
         item = self._items[idx]
         saved = Path(res["output_path"])
+        self._config.last_save_dir = remember_last_save_dir(saved, self._config_path)
         orig_mb = res.get("orig_size_bytes", 0) / (1024 * 1024)
         new_mb = res.get("size_bytes", 0) / (1024 * 1024)
         size_pct = (1.0 - new_mb / max(1e-9, orig_mb)) * 100.0 if orig_mb > 0 else 0.0

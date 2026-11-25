@@ -23,12 +23,27 @@ import numpy as np
 from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Defeaturing, BRepAlgoAPI_Fuse
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Defeaturing, BRepAlgoAPI_Fuse
 from OCP.BRepBndLib import BRepBndLib
-from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
-from OCP.BRepGProp import BRepGProp
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
-from OCP.GeomAbs import GeomAbs_BSplineSurface, GeomAbs_Cylinder, GeomAbs_Plane
+from OCP.BRepBuilderAPI import (
+    BRepBuilderAPI_MakeFace,
+    BRepBuilderAPI_MakePolygon,
+    BRepBuilderAPI_Transform,
+)
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepGProp import BRepGProp, BRepGProp_Face
+from OCP.BRepPrimAPI import (
+    BRepPrimAPI_MakeBox,
+    BRepPrimAPI_MakeCylinder,
+    BRepPrimAPI_MakePrism,
+)
+from OCP.GeomAbs import (
+    GeomAbs_BSplineSurface,
+    GeomAbs_Cone,
+    GeomAbs_Cylinder,
+    GeomAbs_Plane,
+    GeomAbs_Sphere,
+)
 from OCP.gp import gp_Ax1, gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
@@ -64,7 +79,20 @@ from simple_3d_step.models import (
 )
 
 
-_BOARD_NAME_RE = re.compile(r"\b(PCB|BOARD|SUBSTRATE|FR4|MAINBOARD|PWB)\b", re.IGNORECASE)
+_BOARD_NAME_RE = re.compile(
+    r"(?:^|[^A-Za-z])(PCB\w*|BOARD\w*|SUBSTRATE|FR4|MAINBOARD\w*|SUBBOARD\w*|DAUGHTER\w*|PWB\w*)",
+    re.IGNORECASE,
+)
+_HEATSINK_NAME_RE = re.compile(
+    r"(?:^|[^A-Za-z])(HEAT[\s_-]?SINK|HEATSINK|COOLER|RADIATOR|THERMAL[\s_-]?(?:PAD|PLATE|BLOCK|SPREADER)?|"
+    r"HEAT[\s_-]?(?:SPREADER|PLATE)|COLD[\s_-]?PLATE|FIN[\s_-]?BLOCK|BRK[\s_-])"
+    r"|(?:^|[^A-Za-z0-9])(HS|HT)\d+(?:[^A-Za-z0-9]|$)",
+    re.IGNORECASE,
+)
+_ELECTRONIC_REFDES_RE = re.compile(
+    r"^(U|IC|Q|J|CN|CON|P|R|C|L|D|Y|X|SW|K|T|F|FB|TP|LED|JP|BH|RT|RV|ZD|TVS|FL)\d+",
+    re.IGNORECASE,
+)
 _DEFAULT_BODY_COLOR: RGBColor = (0.18, 0.18, 0.20)
 _DEFAULT_BOARD_COLOR: RGBColor = (0.0, 0.30, 0.10)
 
@@ -275,14 +303,17 @@ def _world_to_local_bbox(
     )
 
 
-def _fuse_primitives_to_single_solid(shapes: list[TopoDS_Shape]) -> Optional[TopoDS_Shape]:
-    """Fuse a small list of overlapping analytic primitives into 1 clean unified solid."""
+def _fuse_primitives_to_single_solid(
+    shapes: list[TopoDS_Shape],
+    fuzzy_values: tuple[float, ...] = (0.0, 1e-3, 5e-3),
+) -> Optional[TopoDS_Shape]:
+    """Fuse a list of touching/overlapping solids into 1 clean unified solid."""
     if not shapes:
         return None
     if len(shapes) == 1:
         return shapes[0]
 
-    for fuzzy in (0.0, 1e-3, 5e-3):
+    for fuzzy in fuzzy_values:
         try:
             fuse = BRepAlgoAPI_Fuse()
             fuse.SetRunParallel(True)
@@ -404,50 +435,320 @@ def _extract_representative_color(
     return _ensure_min_brightness(picked, min_brightness) if min_brightness > 0.0 else picked
 
 
+def _analyze_slab_topology(
+    body: PcbSubBody,
+    thin_axis: int,
+) -> tuple[float, float, int, int]:
+    """Analyze a candidate slab along ``thin_axis`` (0=X, 1=Y, 2=Z).
+
+    Returns ``(bot_plane_area, top_plane_area, cone_count, sphere_bspline_count)``.
+    """
+    bmin, bmax = body.bbox_min, body.bbox_max
+    t_lo, t_hi = float(bmin[thin_axis]), float(bmax[thin_axis])
+    tol = max(0.08, 0.06 * max(0.1, t_hi - t_lo))
+
+    bot_area = 0.0
+    top_area = 0.0
+    cone_cnt = 0
+    freeform_cnt = 0
+
+    exp = TopExp_Explorer(body.shape, TopAbs_FACE)
+    while exp.More():
+        face = to_face(exp.Current())
+        try:
+            surf = BRepAdaptor_Surface(face, False)
+            st = surf.GetType()
+            if st == GeomAbs_Plane:
+                d = surf.Plane().Axis().Direction()
+                n_comp = abs((float(d.X()), float(d.Y()), float(d.Z()))[thin_axis])
+                if n_comp > 0.98:
+                    fmin, fmax = _shape_bbox(face)
+                    fz = 0.5 * (float(fmin[thin_axis]) + float(fmax[thin_axis]))
+                    if abs(fz - t_lo) <= tol:
+                        props = GProp_GProps()
+                        BRepGProp.SurfaceProperties_s(face, props)
+                        bot_area += abs(float(props.Mass()))
+                    elif abs(fz - t_hi) <= tol:
+                        props = GProp_GProps()
+                        BRepGProp.SurfaceProperties_s(face, props)
+                        top_area += abs(float(props.Mass()))
+            elif st == GeomAbs_Cone:
+                cone_cnt += 1
+            elif st in (GeomAbs_Sphere, GeomAbs_BSplineSurface):
+                freeform_cnt += 1
+        except Exception:
+            pass
+        exp.Next()
+
+    return bot_area, top_area, cone_cnt, freeform_cnt
+
+
+def _is_electronic_refdes(comp: PcbComponentGroup) -> bool:
+    ref = (comp.ref_des or "").strip()
+    if ref and _ELECTRONIC_REFDES_RE.match(ref):
+        return True
+    return False
+
+
+def _component_own_name(comp: PcbComponentGroup) -> str:
+    """Return the component's own RefDes/leaf name without any ancestor PCB sub-assembly prefix."""
+    own = f"{comp.ref_des} {comp.leaf_name}".strip()
+    return own if own else comp.name
+
+
 def _detect_board_indices(components: list[PcbComponentGroup]) -> set[int]:
-    """Identify the PCB substrate component(s) by thin-slab geometry and naming."""
+    """Identify 1, 2, or more PCB substrate boards by flat double-sided slab geometry & naming.
+
+    Handles:
+      - Multi-PCB assemblies (mainboard + smaller daughterboards / sub-PCBs)
+      - Horizontal (XY) and vertical/riser (XZ / YZ) PCBs
+      - Distinguishes flat PCB substrates from machined heatsink/bracket plates (many cones/steps)
+        and from mounted electronic ICs/connectors.
+    """
     if not components:
         return set()
 
-    xy_areas = [
-        max(0.0, float(c.bbox_size[0]) * float(c.bbox_size[1])) if c.bodies else 0.0
-        for c in components
-    ]
-    max_area = max(xy_areas) if xy_areas else 0.0
-    if max_area <= 0.0:
-        return set()
-
     board_indices: set[int] = set()
-    best_idx: Optional[int] = None
-    best_score = -1.0
+    best_fallback_idx: Optional[int] = None
+    best_fallback_score = -1.0
 
     for idx, comp in enumerate(components):
         if not comp.bodies:
             continue
-        sz = comp.bbox_size
-        dx, dy, dz = float(sz[0]), float(sz[1]), float(sz[2])
-        area_xy = dx * dy
-        if area_xy < 0.35 * max_area:
+        if _is_electronic_refdes(comp):
             continue
-        # PCB boards are thin planar slabs (typically 0.3 mm to 6.5 mm thick)
-        if not (0.25 <= dz <= 6.5):
-            continue
-        aspect = max(dx, dy) / max(dz, 1e-3)
-        if aspect < 5.0:
-            continue
-        score = area_xy / max_area
-        if _BOARD_NAME_RE.search(comp.name):
-            score += 0.5
-        if score > best_score:
-            best_score = score
-            best_idx = idx
-        # Also include multi-panel boards with nearly equal area and thickness
-        if area_xy >= 0.5 * max_area and aspect >= 8.0:
-            board_indices.add(idx)
 
-    if best_idx is not None:
-        board_indices.add(best_idx)
+        own_name = _component_own_name(comp)
+        has_board_name = _BOARD_NAME_RE.search(own_name) is not None
+        has_heatsink_name = _HEATSINK_NAME_RE.search(own_name) is not None
+        if has_heatsink_name and not has_board_name:
+            continue
+
+        main_body = max(comp.bodies, key=lambda b: (b.volume, b.surface_area))
+        # Guard against ever classifying an unflattened multi-part assembly as a single PCB slab
+        if len(comp.bodies) > 25 and main_body.volume < 0.50 * max(comp.total_volume, 1e-6):
+            continue
+        sz = main_body.bbox_size
+        order = np.argsort(sz)
+        thin_axis = int(order[0])
+        t_min = float(sz[order[0]])
+        d_mid = float(sz[order[1]])
+        d_max = float(sz[order[2]])
+
+        # PCB substrates are thin planar slabs (0.25 mm to 6.5 mm thick)
+        if not (0.25 <= t_min <= 6.5):
+            continue
+        if d_mid < 10.0 or d_max < 12.0:
+            continue
+        aspect_mid = d_mid / max(t_min, 1e-3)
+        aspect_max = d_max / max(t_min, 1e-3)
+        if aspect_mid < 3.5 or aspect_max < 4.5:
+            continue
+
+        bot_area, top_area, cone_cnt, freeform_cnt = _analyze_slab_topology(main_body, thin_axis)
+        face_area_ref = max(1e-6, d_mid * d_max)
+        cov_both = (bot_area + top_area) / (2.0 * face_area_ref)
+        balance = min(bot_area, top_area) / max(bot_area, top_area, 1e-6)
+
+        # Machined plates / brackets with many countersunk cones or heavy freeform BGA/chip faces
+        # are NOT PCB substrates (unless explicitly named PCB/Board).
+        is_flat_double_sided = (
+            cov_both >= (0.30 if has_board_name else 0.48)
+            and balance >= (0.40 if has_board_name else 0.50)
+            and freeform_cnt <= 8
+        )
+
+        if has_board_name and (is_flat_double_sided or (aspect_max >= 5.0 and cone_cnt <= 8)):
+            board_indices.add(idx)
+            continue
+
+        # Unnamed / generic PCB substrate (supports multi-board assemblies of different sizes!)
+        if (
+            is_flat_double_sided
+            and 0.30 <= t_min <= 4.5
+            and d_mid >= 18.0
+            and d_max >= 20.0
+            and aspect_max >= 6.0
+            and cone_cnt <= 4
+        ):
+            board_indices.add(idx)
+            continue
+
+        # Track largest plausible thin-slab fallback if no explicit/clean board was found
+        if aspect_max >= 5.0 and freeform_cnt <= 12 and cone_cnt <= 6:
+            score = d_mid * d_max + (5000.0 if has_board_name else 0.0)
+            if score > best_fallback_score:
+                best_fallback_score = score
+                best_fallback_idx = idx
+
+    if not board_indices and best_fallback_idx is not None:
+        board_indices.add(best_fallback_idx)
     return board_indices
+
+
+def _has_parallel_fin_array(body: PcbSubBody) -> bool:
+    """Return True if a body exhibits an extruded finned heatsink profile (>= 6 parallel fin walls)."""
+    total_area = float(body.surface_area)
+    if total_area <= 1e-6:
+        return False
+
+    # Group planar faces by unsigned normal direction (n and -n share the same fin pitch axis)
+    dir_groups: list[dict[str, Any]] = []
+    min_wall_area = max(1.5, 0.012 * total_area)
+
+    exp = TopExp_Explorer(body.shape, TopAbs_FACE)
+    while exp.More():
+        face = to_face(exp.Current())
+        try:
+            surf = BRepAdaptor_Surface(face, False)
+            if surf.GetType() == GeomAbs_Plane:
+                props = GProp_GProps()
+                BRepGProp.SurfaceProperties_s(face, props)
+                area = abs(float(props.Mass()))
+                if area >= min_wall_area:
+                    pl = surf.Plane()
+                    d = pl.Axis().Direction()
+                    n = np.array([float(d.X()), float(d.Y()), float(d.Z())], dtype=np.float64)
+                    nlen = float(np.linalg.norm(n))
+                    if nlen > 1e-12:
+                        n /= nlen
+                        # Canonicalize sign so largest component is positive
+                        dom = int(np.argmax(np.abs(n)))
+                        if n[dom] < 0.0:
+                            n = -n
+                        loc = pl.Location()
+                        offset = float(n[0] * loc.X() + n[1] * loc.Y() + n[2] * loc.Z())
+                        placed = False
+                        for grp in dir_groups:
+                            if abs(float(np.dot(grp["n"], n))) > 0.995:
+                                grp["planes"].append((offset, area))
+                                placed = True
+                                break
+                        if not placed:
+                            dir_groups.append({"n": n, "planes": [(offset, area)]})
+        except Exception:
+            pass
+        exp.Next()
+
+    for grp in dir_groups:
+        # Merge coplanar faces at the same offset (within 0.15 mm)
+        planes = sorted(grp["planes"], key=lambda x: x[0])
+        merged: list[tuple[float, float]] = []
+        for off, area in planes:
+            if merged and abs(off - merged[-1][0]) <= 0.15:
+                merged[-1] = (merged[-1][0], merged[-1][1] + area)
+            else:
+                merged.append((off, area))
+        # >= 6 distinct parallel fin walls (>= 3 extruded fins) carrying >= 25% of surface area
+        if len(merged) >= 6:
+            fin_area = sum(a for _, a in merged)
+            if fin_area >= 0.25 * total_area:
+                return True
+    return False
+
+
+def _has_pin_fin_array(body: PcbSubBody) -> bool:
+    """Return True if a body is a pin-fin heatsink (flat base + >= 9 similar vertical pin posts)."""
+    bsz = body.bbox_size
+    if float(np.min(bsz)) < 3.5 or float(np.max(bsz)) < 12.0:
+        return False
+
+    cyl_posts: list[tuple[float, float, float]] = []  # (radius, axis_x_or_y_hash, height)
+    exp = TopExp_Explorer(body.shape, TopAbs_FACE)
+    while exp.More():
+        face = to_face(exp.Current())
+        try:
+            surf = BRepAdaptor_Surface(face, False)
+            if surf.GetType() == GeomAbs_Cylinder:
+                cyl = surf.Cylinder()
+                d = cyl.Axis().Direction()
+                if abs(float(d.Z())) > 0.98 and _is_cylinder_face_concave(face, cyl) is False:
+                    r = float(cyl.Radius())
+                    if 0.30 <= r <= 3.0:
+                        fmin, fmax = _shape_bbox(face)
+                        h = float(fmax[2] - fmin[2])
+                        if h >= 2.0:
+                            loc = cyl.Location()
+                            cyl_posts.append((round(r, 1), round(float(loc.X()), 1) * 1000.0 + round(float(loc.Y()), 1), h))
+        except Exception:
+            pass
+        exp.Next()
+
+    if len(cyl_posts) < 9:
+        return False
+    # Count unique pin centers sharing the dominant pin radius
+    by_r: dict[float, set[float]] = {}
+    for r_key, pos_key, _h in cyl_posts:
+        by_r.setdefault(r_key, set()).add(pos_key)
+    return any(len(centers) >= 9 for centers in by_r.values())
+
+
+def _detect_heatsink_indices(
+    components: list[PcbComponentGroup],
+    board_indices: set[int],
+) -> set[int]:
+    """Identify heatsink / thermal spreader / machined heat-plate components to preserve intact."""
+    heatsink_indices: set[int] = set()
+    board_areas = [
+        float(np.sort(components[i].bbox_size)[1] * np.sort(components[i].bbox_size)[2])
+        for i in board_indices
+        if components[i].bodies
+    ]
+    max_board_area = max(board_areas) if board_areas else 0.0
+    board_boxes = [
+        (components[i].bbox_min, components[i].bbox_max)
+        for i in board_indices
+        if components[i].bodies
+    ]
+
+    for idx, comp in enumerate(components):
+        if idx in board_indices or not comp.bodies:
+            continue
+
+        own_name = _component_own_name(comp)
+        sz = comp.bbox_size
+        s_sorted = np.sort(sz)
+        t_min, d_mid, d_max = float(s_sorted[0]), float(s_sorted[1]), float(s_sorted[2])
+
+        # 1. Explicit heatsink / thermal / bracket naming (check component's own name, not parent PCB prefix)
+        if _HEATSINK_NAME_RE.search(own_name) and d_max >= 8.0 and len(comp.bodies) <= 8:
+            heatsink_indices.add(idx)
+            continue
+
+        # Never misclassify standard mounted electronic components (connectors/ICs/passives/standoffs)
+        if _is_electronic_refdes(comp) or len(comp.bodies) > 6:
+            continue
+
+        main_body = max(comp.bodies, key=lambda b: (b.volume, b.surface_area))
+        bbox_vol = max(1e-6, float(sz[0] * sz[1] * sz[2]))
+        fill_ratio = comp.total_volume / bbox_vol
+
+        # 2. Geometric extruded finned heatsink (>= 6 parallel fin walls with air gaps)
+        if d_max >= 12.0 and d_mid >= 8.0 and t_min >= 3.0 and fill_ratio < 0.80:
+            if _has_parallel_fin_array(main_body) or _has_pin_fin_array(main_body):
+                heatsink_indices.add(idx)
+                continue
+
+        # 3. Large machined thermal baseplate / heat spreader sitting against a PCB
+        #    (e.g. aluminum heatsink plate with countersunk mounting holes under a power PCB)
+        if (
+            len(comp.bodies) <= 4
+            and d_mid >= 25.0
+            and d_max >= 35.0
+            and (max_board_area <= 0.0 or (d_mid * d_max) >= 0.25 * max_board_area)
+        ):
+            overlaps_board = False
+            for bmin, bmax in board_boxes:
+                ox = min(float(comp.bbox_max[0]), float(bmax[0])) - max(float(comp.bbox_min[0]), float(bmin[0]))
+                oy = min(float(comp.bbox_max[1]), float(bmax[1])) - max(float(comp.bbox_min[1]), float(bmin[1]))
+                if ox > 5.0 and oy > 5.0:
+                    overlaps_board = True
+                    break
+            if overlaps_board:
+                heatsink_indices.add(idx)
+                continue
+
+    return heatsink_indices
 
 
 def _cluster_flat_components(
@@ -518,7 +819,7 @@ def _simplify_board_component(
     comp: PcbComponentGroup,
     cfg: PcbSimplifyConfig,
 ) -> PcbSimplifiedPart:
-    """Clean PCB board substrate: keep outline & mounting holes, drop tiny via holes & thin copper."""
+    """Clean PCB board substrate: only apply hole deletion (< min_board_hole_mm), preserve all other geometry."""
     main_body = max(comp.bodies, key=lambda b: (b.volume, b.surface_area))
     board_color = _extract_representative_color(
         [main_body],
@@ -529,7 +830,11 @@ def _simplify_board_component(
     orig_faces = comp.total_faces
     orig_vol = max(main_body.volume, 1e-6)
 
-    # Plug small vertical cylindrical via holes (< min_board_hole_mm) while keeping mounting holes
+    # Identify board normal axis (thin-slab axis: Z for horizontal PCBs, X/Y for vertical daughterboards)
+    thin_axis = int(np.argmin(main_body.bbox_size))
+    u_axis, v_axis = ((1, 2), (2, 0), (0, 1))[thin_axis]
+
+    # Plug small cylindrical via holes (< min_board_hole_mm) aligned with board normal while keeping all else
     if cfg.keep_board_holes and cfg.min_board_hole_mm > 0.0:
         min_dia = float(cfg.min_board_hole_mm)
         small_hole_faces: list[TopoDS_Shape] = []
@@ -541,17 +846,18 @@ def _simplify_board_component(
                 if surf.GetType() == GeomAbs_Cylinder:
                     cyl = surf.Cylinder()
                     axis_dir = cyl.Axis().Direction()
-                    if abs(float(axis_dir.Z())) > 0.95:
+                    dir_comp = abs((float(axis_dir.X()), float(axis_dir.Y()), float(axis_dir.Z()))[thin_axis])
+                    if dir_comp > 0.95:
                         dia = 2.0 * float(cyl.Radius())
                         if 0.0 < dia < min_dia:
-                            # Ensure this is an internal hole (radius small vs board, bbox inside board)
+                            # Ensure this is an internal hole (strictly inside board outline in plane)
                             fmin, fmax = _shape_bbox(face)
                             margin = 0.2
                             if (
-                                fmin[0] > main_body.bbox_min[0] + margin
-                                and fmax[0] < main_body.bbox_max[0] - margin
-                                and fmin[1] > main_body.bbox_min[1] + margin
-                                and fmax[1] < main_body.bbox_max[1] - margin
+                                fmin[u_axis] > main_body.bbox_min[u_axis] + margin
+                                and fmax[u_axis] < main_body.bbox_max[u_axis] - margin
+                                and fmin[v_axis] > main_body.bbox_min[v_axis] + margin
+                                and fmax[v_axis] < main_body.bbox_max[v_axis] - margin
                             ):
                                 small_hole_faces.append(face)
             except Exception:
@@ -577,7 +883,7 @@ def _simplify_board_component(
             except Exception:
                 pass
 
-    # Merge coplanar / co-cylindrical faces on the board
+    # Merge coplanar / co-cylindrical faces on the board without altering its geometry
     try:
         unify = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
         unify.Build()
@@ -597,9 +903,67 @@ def _simplify_board_component(
         color=board_color,
         category="board",
         ref_des=comp.ref_des or "Board",
-        leaf_name=comp.leaf_name or "Board",
+        leaf_name=comp.leaf_name or "",
         original_bodies=len(comp.bodies),
         original_faces=orig_faces,
+        simplified_faces=_count_subshapes(shape, TopAbs_FACE),
+        solid_count=max(1, _count_subshapes(shape, TopAbs_SOLID)),
+    )
+
+
+def _simplify_heatsink_component(
+    comp: PcbComponentGroup,
+    cfg: PcbSimplifyConfig,
+) -> PcbSimplifiedPart:
+    """Preserve heatsink / thermal spreader original geometry intact (no hole deletion or boxing)."""
+    bodies = list(comp.bodies)
+    main_body = max(bodies, key=lambda b: (b.volume, b.surface_area))
+    hs_color = (
+        _extract_representative_color(
+            bodies,
+            default_color=(0.60, 0.62, 0.65),
+            min_brightness=cfg.min_color_brightness,
+        )
+        if cfg.preserve_colors
+        else None
+    )
+    orig_vol = max(main_body.volume, 1e-6)
+
+    if len(bodies) == 1:
+        shape = main_body.shape
+        try:
+            unify = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
+            unify.Build()
+            unified = unify.Shape()
+            if (
+                not unified.IsNull()
+                and _count_subshapes(unified, TopAbs_SOLID) == 1
+                and BRepCheck_Analyzer(unified).IsValid()
+            ):
+                u_vol = _shape_volume(unified)
+                if 0.99 * orig_vol <= u_vol <= 1.01 * orig_vol:
+                    shape = unified
+        except Exception:
+            pass
+    else:
+        fused = _fuse_primitives_to_single_solid(
+            [b.shape for b in bodies],
+            fuzzy_values=(0.0, 1e-3, 5e-3, 2e-2),
+        )
+        if fused is not None and BRepCheck_Analyzer(fused).IsValid():
+            shape = fused
+        else:
+            shape = main_body.shape
+
+    return PcbSimplifiedPart(
+        name=comp.name or "Heatsink",
+        shape=shape,
+        color=hs_color,
+        category="heatsink",
+        ref_des=comp.ref_des,
+        leaf_name=comp.leaf_name,
+        original_bodies=len(comp.bodies),
+        original_faces=comp.total_faces,
         simplified_faces=_count_subshapes(shape, TopAbs_FACE),
         solid_count=max(1, _count_subshapes(shape, TopAbs_SOLID)),
     )
@@ -656,6 +1020,647 @@ def _filter_text_bodies(
 
 
 # ---------------------------------------------------------------------------
+# Surface Normal, Hole Detection & Low-Complexity Preservation Helpers
+# ---------------------------------------------------------------------------
+
+def _face_outward_normal_at_mid(face: TopoDS_Shape) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Return (midpoint_3d, outward_unit_normal) accounting for topological face orientation."""
+    try:
+        bf = BRepGProp_Face(face)
+        u1, u2, v1, v2 = bf.Bounds()
+        if not (math.isfinite(u1) and math.isfinite(u2) and math.isfinite(v1) and math.isfinite(v2)):
+            return None
+        p = gp_Pnt()
+        vnorm = gp_Vec()
+        bf.Normal(0.5 * (u1 + u2), 0.5 * (v1 + v2), p, vnorm)
+        n = np.array([float(vnorm.X()), float(vnorm.Y()), float(vnorm.Z())], dtype=np.float64)
+        nlen = float(np.linalg.norm(n))
+        if nlen < 1e-12:
+            return None
+        return np.array([float(p.X()), float(p.Y()), float(p.Z())], dtype=np.float64), n / nlen
+    except Exception:
+        return None
+
+
+def _is_cylinder_face_concave(face: TopoDS_Shape, cyl: Any) -> Optional[bool]:
+    """Return True if cylindrical face normal points inward toward axis (internal bore/hole)."""
+    res = _face_outward_normal_at_mid(face)
+    if res is None:
+        return None
+    pt, n = res
+    loc = cyl.Location()
+    d = cyl.Axis().Direction()
+    ax_orig = np.array([float(loc.X()), float(loc.Y()), float(loc.Z())], dtype=np.float64)
+    ax_dir = np.array([float(d.X()), float(d.Y()), float(d.Z())], dtype=np.float64)
+    alen = float(np.linalg.norm(ax_dir))
+    if alen < 1e-12:
+        return None
+    ax_dir /= alen
+    rel = pt - ax_orig
+    radial = rel - float(np.dot(rel, ax_dir)) * ax_dir
+    rlen = float(np.linalg.norm(radial))
+    if rlen < 1e-9:
+        return None
+    dot = float(np.dot(n, radial / rlen))
+    if dot < -0.2:
+        return True
+    if dot > 0.2:
+        return False
+    return None
+
+
+def _collect_coaxial_cylinders(
+    shapes: list[TopoDS_Shape],
+    axis_pt: np.ndarray,
+    axis_dir: np.ndarray,
+    axis_tol: float,
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[float, float, float, float]]]:
+    """Collect coaxial outer (convex) and inner (concave hole) cylindrical features.
+
+    Returns ``(outer_cyls, inner_holes)`` where each item is ``(radius, total_area, t_min, t_max)``
+    projected along ``axis_dir`` relative to ``axis_pt``, sorted by area descending.
+    """
+    outer_buckets: dict[int, list[float]] = {}
+    inner_buckets: dict[int, list[float]] = {}
+
+    for sh in shapes:
+        exp = TopExp_Explorer(sh, TopAbs_FACE)
+        while exp.More():
+            face = to_face(exp.Current())
+            try:
+                surf = BRepAdaptor_Surface(face, False)
+                if surf.GetType() != GeomAbs_Cylinder:
+                    exp.Next()
+                    continue
+                cyl = surf.Cylinder()
+                d = cyl.Axis().Direction()
+                cdir = np.array([float(d.X()), float(d.Y()), float(d.Z())], dtype=np.float64)
+                clen = float(np.linalg.norm(cdir))
+                if clen < 1e-12 or abs(float(np.dot(cdir / clen, axis_dir))) < 0.97:
+                    exp.Next()
+                    continue
+                loc = cyl.Location()
+                cloc = np.array([float(loc.X()), float(loc.Y()), float(loc.Z())], dtype=np.float64)
+                off = cloc - axis_pt
+                perp_dist = float(np.linalg.norm(off - float(np.dot(off, axis_dir)) * axis_dir))
+                if perp_dist > axis_tol:
+                    exp.Next()
+                    continue
+
+                props = GProp_GProps()
+                BRepGProp.SurfaceProperties_s(face, props)
+                area = abs(float(props.Mass()))
+                if area < 0.05:
+                    exp.Next()
+                    continue
+
+                is_concave = _is_cylinder_face_concave(face, cyl)
+                if is_concave is None:
+                    exp.Next()
+                    continue
+
+                # Project face bbox corners onto axis_dir for reliable axial span
+                fmin, fmax = _shape_bbox(face)
+                corners = np.array(
+                    [
+                        [fmin[0], fmin[1], fmin[2]],
+                        [fmax[0], fmin[1], fmin[2]],
+                        [fmin[0], fmax[1], fmin[2]],
+                        [fmax[0], fmax[1], fmin[2]],
+                        [fmin[0], fmin[1], fmax[2]],
+                        [fmax[0], fmin[1], fmax[2]],
+                        [fmin[0], fmax[1], fmax[2]],
+                        [fmax[0], fmax[1], fmax[2]],
+                    ],
+                    dtype=np.float64,
+                )
+                ts = (corners - axis_pt) @ axis_dir
+                t0, t1 = float(np.min(ts)), float(np.max(ts))
+
+                r = float(cyl.Radius())
+                rkey = int(round(r * 25.0))  # 0.04 mm radius clustering bucket
+                target = inner_buckets if is_concave else outer_buckets
+                entry = target.get(rkey)
+                if entry is None:
+                    target[rkey] = [r * area, area, t0, t1]
+                else:
+                    entry[0] += r * area
+                    entry[1] += area
+                    entry[2] = min(entry[2], t0)
+                    entry[3] = max(entry[3], t1)
+            except Exception:
+                pass
+            exp.Next()
+
+    def _finalize(buckets: dict[int, list[float]]) -> list[tuple[float, float, float, float]]:
+        items = [
+            (v[0] / v[1], v[1], v[2], v[3])
+            for v in buckets.values()
+            if v[1] > 0.0
+        ]
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items
+
+    return _finalize(outer_buckets), _finalize(inner_buckets)
+
+
+def _count_freeform_faces(bodies: list[PcbSubBody]) -> int:
+    """Count BSpline and spherical faces (typically heavy filleted SMD chips or BGA balls)."""
+    cnt = 0
+    for b in bodies:
+        exp = TopExp_Explorer(b.shape, TopAbs_FACE)
+        while exp.More():
+            try:
+                st = BRepAdaptor_Surface(to_face(exp.Current()), False).GetType()
+                if st in (GeomAbs_BSplineSurface, GeomAbs_Sphere):
+                    cnt += 1
+            except Exception:
+                pass
+            exp.Next()
+    return cnt
+
+
+def _bodies_have_significant_hole(bodies: list[PcbSubBody]) -> bool:
+    """Return True if any body contains a significant concave cylindrical bore/hole."""
+    for b in bodies:
+        exp = TopExp_Explorer(b.shape, TopAbs_FACE)
+        while exp.More():
+            face = to_face(exp.Current())
+            try:
+                surf = BRepAdaptor_Surface(face, False)
+                if surf.GetType() == GeomAbs_Cylinder:
+                    cyl = surf.Cylinder()
+                    if float(cyl.Radius()) >= 0.20:
+                        props = GProp_GProps()
+                        BRepGProp.SurfaceProperties_s(face, props)
+                        if abs(float(props.Mass())) >= 1.0 and _is_cylinder_face_concave(face, cyl) is True:
+                            return True
+            except Exception:
+                pass
+            exp.Next()
+    return False
+
+
+def _try_preserve_simple_component(
+    comp: PcbComponentGroup,
+    bodies: list[PcbSubBody],
+    obb_size: tuple[float, float, float],
+    cfg: PcbSimplifyConfig,
+    color: Optional[RGBColor],
+) -> Optional[PcbSimplifiedPart]:
+    """Preserve & unify/fuse low-complexity non-box components without coarse box/cylinder loss.
+
+    Examples:
+      - Flanged terminals with center blind holes (e.g. Terminal_L10, 15 -> 9 faces)
+      - Round mounting standoffs with center M3 holes (e.g. TH-1.6-5.0-M3, 15 -> 9 faces)
+      - Low-face pin headers with housing + pins (e.g. HWHP-2P, 32 faces)
+      - Low-face SMD electrolytic caps with chamfered square base & pins (e.g. 4 bodies, 35 -> 34 faces)
+      - Bridge jumpers & raised power shunts (28..52 faces)
+
+    Compact brick-like SMD chips (<= small_part_box_mm with high OBB fill >= 0.82 and no hole)
+    and pure primitive cylinders are deliberately skipped so they still benefit from crisp
+    primitive replacement and XCAF prototype instancing.
+    """
+    max_faces = int(cfg.preserve_simple_max_faces)
+    if max_faces <= 0 or not bodies:
+        return None
+
+    total_faces = sum(b.face_count for b in bodies)
+    if total_faces > max_faces or len(bodies) > 6:
+        return None
+
+    # Heavy BSpline/Sphere filleted SMD chips (e.g. 0402/0603/1206/ferrite beads) should simplify to boxes
+    if _count_freeform_faces(bodies) > 6:
+        return None
+
+    obb_w, obb_d, obb_h = obb_size
+    max_dim = max(obb_w, obb_d, obb_h)
+    obb_vol = max(1e-6, obb_w * obb_d * obb_h)
+    total_vol = sum(max(0.0, b.volume) for b in bodies)
+    obb_fill = total_vol / obb_vol
+
+    has_hole: Optional[bool] = None
+
+    def _get_has_hole() -> bool:
+        nonlocal has_hole
+        if has_hole is None:
+            has_hole = _bodies_have_significant_hole(bodies)
+        return has_hole
+
+    # Compact solid brick-like SMD chip (no hole, >= 82% of OBB filled) -> collapse to 6-face OBB box
+    if max_dim <= cfg.small_part_box_mm and obb_fill >= 0.82 and not _get_has_hole():
+        return None
+
+    # Let pure primitive cylinders (without holes/chamfered bases) go to _try_simplify_as_cylinder
+    # so they receive category="cylinder" and shared XCAF prototype instancing
+    if cfg.detect_cylinders:
+        if len(bodies) == 1 and total_faces <= 6 and not _get_has_hole():
+            if _analyze_cylinder_candidate(bodies[0], cfg.cylinder_circularity_min) is not None:
+                return None
+        elif len(bodies) == 2 and total_faces <= 12 and not _get_has_hole():
+            f_sorted = sorted(bodies, key=lambda b: b.face_count)
+            if (
+                f_sorted[0].face_count <= 6
+                and f_sorted[1].face_count == 6
+                and _analyze_cylinder_candidate(f_sorted[0], cfg.cylinder_circularity_min) is not None
+            ):
+                return None
+
+    # Build clean 1-solid preserved shape
+    if len(bodies) == 1:
+        orig_shape = bodies[0].shape
+        if _count_subshapes(orig_shape, TopAbs_SOLID) != 1:
+            return None
+        orig_vol = max(bodies[0].volume, 1e-6)
+        final_shape = orig_shape
+        try:
+            unify = ShapeUpgrade_UnifySameDomain(orig_shape, True, True, False)
+            unify.Build()
+            unified = unify.Shape()
+            if (
+                not unified.IsNull()
+                and _count_subshapes(unified, TopAbs_SOLID) == 1
+                and BRepCheck_Analyzer(unified).IsValid()
+            ):
+                u_vol = _shape_volume(unified)
+                if 0.98 * orig_vol <= u_vol <= 1.02 * orig_vol:
+                    final_shape = unified
+        except Exception:
+            pass
+    else:
+        fused = _fuse_primitives_to_single_solid(
+            [b.shape for b in bodies],
+            fuzzy_values=(0.0, 1e-3, 5e-3, 2e-2),
+        )
+        if fused is None or _count_subshapes(fused, TopAbs_SOLID) != 1:
+            return None
+        if not BRepCheck_Analyzer(fused).IsValid():
+            return None
+        main_vol = max(b.volume for b in bodies)
+        fused_vol = _shape_volume(fused)
+        if fused_vol < 0.90 * main_vol or fused_vol > max(1.10 * total_vol, main_vol * 1.10):
+            return None
+        final_shape = fused
+
+    return PcbSimplifiedPart(
+        name=comp.name,
+        shape=final_shape,
+        color=color if cfg.preserve_colors else None,
+        category="preserved",
+        ref_des=comp.ref_des,
+        leaf_name=comp.leaf_name,
+        original_bodies=len(comp.bodies),
+        original_faces=comp.total_faces,
+        simplified_faces=_count_subshapes(final_shape, TopAbs_FACE),
+        solid_count=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hexagonal Standoff / Post Detection & Simplification
+# ---------------------------------------------------------------------------
+
+def _detect_hex_prism(body: PcbSubBody) -> Optional[dict[str, Any]]:
+    """Detect a regular hexagonal prism aligned with X, Y, or Z in a single face pass."""
+    bsz = body.bbox_size
+    if float(np.min(bsz)) < 0.70 or body.face_count < 8:
+        return None
+    bbox_vol = max(1e-6, float(bsz[0] * bsz[1] * bsz[2]))
+    # A solid hexagon fills at most ~86.6% of its AABB (much less with a screw hole);
+    # skip dense rectangular bricks (>= 90% AABB fill) immediately.
+    if body.volume / bbox_vol > 0.90:
+        return None
+
+    total_area = float(body.surface_area)
+    if total_area <= 1e-6:
+        return None
+
+    # Collect planar faces perpendicular to Z (2), X (0), or Y (1) in ONE pass
+    perp_by_axis: dict[int, list[tuple[float, float, float, float, float, float, float]]] = {
+        2: [],
+        0: [],
+        1: [],
+    }
+    uv_map = {0: (1, 2), 1: (2, 0), 2: (0, 1)}
+
+    exp = TopExp_Explorer(body.shape, TopAbs_FACE)
+    while exp.More():
+        face = to_face(exp.Current())
+        try:
+            surf = BRepAdaptor_Surface(face, False)
+            if surf.GetType() == GeomAbs_Plane:
+                res = _face_outward_normal_at_mid(face)
+                if res is not None:
+                    pt, n = res
+                    # Check which principal axis (if any) this plane is parallel to (|n[axis]| < 0.05)
+                    matched_axes = [ax for ax in (2, 0, 1) if abs(float(n[ax])) < 0.05]
+                    if matched_axes:
+                        props = GProp_GProps()
+                        BRepGProp.SurfaceProperties_s(face, props)
+                        area = abs(float(props.Mass()))
+                        if area >= 0.05:
+                            fmin, fmax = _shape_bbox(face)
+                            for ax in matched_axes:
+                                u_idx, v_idx = uv_map[ax]
+                                nu, nv = float(n[u_idx]), float(n[v_idx])
+                                plen = math.hypot(nu, nv)
+                                if plen > 0.95:
+                                    nu /= plen
+                                    nv /= plen
+                                    ang = math.atan2(nv, nu) % (2.0 * math.pi)
+                                    dist = nu * float(pt[u_idx]) + nv * float(pt[v_idx])
+                                    perp_by_axis[ax].append(
+                                        (ang, nu, nv, dist, area, float(fmin[ax]), float(fmax[ax]))
+                                    )
+        except Exception:
+            pass
+        exp.Next()
+
+    pts_cache: Optional[np.ndarray] = None
+    best_hex: Optional[dict[str, Any]] = None
+
+    for axis_idx in (2, 0, 1):
+        perp_planes = perp_by_axis[axis_idx]
+        if len(perp_planes) < 6:
+            continue
+
+        # Cluster coplanar side faces (same outward normal angle within 3.5 deg & offset within 0.08 mm)
+        clusters: list[dict[str, float]] = []
+        for ang, nu, nv, dist, area, t0, t1 in sorted(perp_planes, key=lambda x: x[4], reverse=True):
+            placed = False
+            for cl in clusters:
+                da = abs(((ang - cl["ang"] + math.pi) % (2.0 * math.pi)) - math.pi)
+                if da < math.radians(3.5) and abs(dist - cl["dist"]) < 0.08:
+                    tot = cl["area"] + area
+                    cl["dist"] = (cl["dist"] * cl["area"] + dist * area) / tot
+                    cl["area"] = tot
+                    cl["t0"] = min(cl["t0"], t0)
+                    cl["t1"] = max(cl["t1"], t1)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append(
+                    {"ang": ang, "nu": nu, "nv": nv, "dist": dist, "area": area, "t0": t0, "t1": t1}
+                )
+
+        if len(clusters) < 6:
+            continue
+
+        clusters.sort(key=lambda c: c["area"], reverse=True)
+        top6 = clusters[:6]
+        sum6_area = sum(c["area"] for c in top6)
+        all_perp_area = sum(c["area"] for c in clusters)
+        min6_area = min(c["area"] for c in top6)
+        max6_area = max(c["area"] for c in top6)
+
+        if max6_area <= 1e-6 or (min6_area / max6_area) < 0.40:
+            continue
+        if (sum6_area / total_area) < 0.25 or (sum6_area / max(1e-6, all_perp_area)) < 0.55:
+            continue
+
+        # Check 60-degree regular hexagonal angular spacing
+        top6.sort(key=lambda c: c["ang"])
+        angs_deg = [math.degrees(c["ang"]) for c in top6]
+        diffs = [(angs_deg[(i + 1) % 6] - angs_deg[i]) % 360.0 for i in range(6)]
+        if any(abs(d - 60.0) > 5.0 for d in diffs):
+            continue
+
+        # Least-squares fit for center (uc, vc) and inradius r_in: nu*uc + nv*vc + r_in = dist
+        A = np.array([[c["nu"], c["nv"], 1.0] for c in top6], dtype=np.float64)
+        rhs = np.array([c["dist"] for c in top6], dtype=np.float64)
+        sol, _, _, _ = np.linalg.lstsq(A, rhs, rcond=None)
+        uc, vc, r_in = float(sol[0]), float(sol[1]), float(sol[2])
+        if r_in < 0.50:
+            continue
+        max_err = float(np.max(np.abs(A @ sol - rhs)))
+        if max_err > max(0.08, 0.05 * r_in):
+            continue
+
+        r_hex = r_in / math.cos(math.pi / 6.0)
+        t_hex0 = min(c["t0"] for c in top6)
+        t_hex1 = max(c["t1"] for c in top6)
+        if (t_hex1 - t_hex0) < 0.40:
+            continue
+
+        # Verify body vertices within the hex axial span stay inside ~1.22 * R_hex
+        u_idx, v_idx = uv_map[axis_idx]
+        if pts_cache is None:
+            pts_cache = _collect_shape_points(body.shape)
+        t_pts = pts_cache[:, axis_idx]
+        in_span = (t_pts >= t_hex0 - 0.05) & (t_pts <= t_hex1 + 0.05)
+        if np.any(in_span):
+            du = pts_cache[in_span, u_idx] - uc
+            dv = pts_cache[in_span, v_idx] - vc
+            max_rad = float(np.max(np.hypot(du, dv)))
+            if max_rad > r_hex * 1.22:
+                continue
+
+        axis_vec = np.zeros(3, dtype=np.float64)
+        axis_vec[axis_idx] = 1.0
+        cand = {
+            "axis_idx": axis_idx,
+            "axis_vec": axis_vec,
+            "u_idx": u_idx,
+            "v_idx": v_idx,
+            "uc": uc,
+            "vc": vc,
+            "r_in": r_in,
+            "r_hex": r_hex,
+            "phi0": top6[0]["ang"] + math.pi / 6.0,
+            "t_hex0": t_hex0,
+            "t_hex1": t_hex1,
+            "score": sum6_area / total_area,
+        }
+        if best_hex is None or cand["score"] > best_hex["score"]:
+            best_hex = cand
+            if axis_idx == 2:
+                break
+
+    return best_hex
+
+
+def _try_simplify_as_hex_post(
+    comp: PcbComponentGroup,
+    bodies: list[PcbSubBody],
+    cfg: PcbSimplifyConfig,
+    color: RGBColor,
+) -> Optional[PcbSimplifiedPart]:
+    """Simplify hexagonal standoffs/posts into a clean hex prism (+ coaxial pilot & center hole)."""
+    if not cfg.detect_hex_posts or not bodies:
+        return None
+
+    main_body = max(bodies, key=lambda b: (b.volume, b.surface_area))
+    best_hex = _detect_hex_prism(main_body)
+    if best_hex is None:
+        return None
+
+    axis_idx: int = best_hex["axis_idx"]
+    axis_vec: np.ndarray = best_hex["axis_vec"]
+    u_idx: int = best_hex["u_idx"]
+    v_idx: int = best_hex["v_idx"]
+    uc: float = best_hex["uc"]
+    vc: float = best_hex["vc"]
+    r_in: float = best_hex["r_in"]
+    r_hex: float = best_hex["r_hex"]
+    phi0: float = best_hex["phi0"]
+    t_hex0: float = best_hex["t_hex0"]
+    t_hex1: float = best_hex["t_hex1"]
+
+    part_t0 = float(min(b.bbox_min[axis_idx] for b in bodies))
+    part_t1 = float(max(b.bbox_max[axis_idx] for b in bodies))
+    total_h = max(0.2, part_t1 - part_t0)
+
+    # Local frame origin at (uc, vc, part_t0) along (u_dir, v_dir, axis_vec)
+    axis_pt = np.zeros(3, dtype=np.float64)
+    axis_pt[u_idx] = uc
+    axis_pt[v_idx] = vc
+    axis_pt[axis_idx] = 0.0
+
+    outer_cyls, inner_holes = _collect_coaxial_cylinders(
+        [b.shape for b in bodies],
+        axis_pt,
+        axis_vec,
+        axis_tol=max(0.15, 0.12 * r_in),
+    )
+
+    def _local_pt(u: float, v: float, t_rel: float) -> gp_Pnt:
+        if axis_idx == 2:
+            return gp_Pnt(u, v, t_rel)
+        coords = [0.0, 0.0, 0.0]
+        coords[u_idx] = uc + u
+        coords[v_idx] = vc + v
+        coords[axis_idx] = part_t0 + t_rel
+        return gp_Pnt(coords[0], coords[1], coords[2])
+
+    def _local_dir() -> gp_Dir:
+        return gp_Dir(float(axis_vec[0]), float(axis_vec[1]), float(axis_vec[2]))
+
+    # 1. Build regular hexagonal prism
+    poly = BRepBuilderAPI_MakePolygon()
+    hex_base_rel = t_hex0 - part_t0
+    for k in range(6):
+        th = phi0 + k * (math.pi / 3.0)
+        poly.Add(_local_pt(r_hex * math.cos(th), r_hex * math.sin(th), hex_base_rel))
+    poly.Close()
+    hex_face = BRepBuilderAPI_MakeFace(poly.Wire()).Face()
+    hex_vec = gp_Vec(
+        float(axis_vec[0] * (t_hex1 - t_hex0)),
+        float(axis_vec[1] * (t_hex1 - t_hex0)),
+        float(axis_vec[2] * (t_hex1 - t_hex0)),
+    )
+    solid = BRepPrimAPI_MakePrism(hex_face, hex_vec).Shape()
+
+    # 2. Fuse significant coaxial cylindrical pilot / boss / flange steps extending past hex ends
+    pilot_sig: list[tuple[float, float, float]] = []
+    for pr, _parea, pt0, pt1 in outer_cyls:
+        if pr < 0.25 or pr > r_hex * 1.60:
+            continue
+        if pt0 < t_hex0 - 0.10:
+            p_bot = part_t0 if (pt0 - part_t0) <= max(0.45, 0.55 * pr) else pt0
+            p_top = t_hex0 + 0.05
+            if p_top - p_bot >= 0.15:
+                cyl = BRepPrimAPI_MakeCylinder(
+                    gp_Ax2(_local_pt(0.0, 0.0, p_bot - part_t0), _local_dir()),
+                    float(pr),
+                    float(p_top - p_bot),
+                ).Shape()
+                fused = _fuse_primitives_to_single_solid([solid, cyl])
+                if fused is not None:
+                    solid = fused
+                    pilot_sig.append((round(pr, 2), round(p_bot - part_t0, 2), round(p_top - part_t0, 2)))
+        elif pt1 > t_hex1 + 0.10:
+            p_bot = t_hex1 - 0.05
+            p_top = part_t1 if (part_t1 - pt1) <= max(0.45, 0.55 * pr) else pt1
+            if p_top - p_bot >= 0.15:
+                cyl = BRepPrimAPI_MakeCylinder(
+                    gp_Ax2(_local_pt(0.0, 0.0, p_bot - part_t0), _local_dir()),
+                    float(pr),
+                    float(p_top - p_bot),
+                ).Shape()
+                fused = _fuse_primitives_to_single_solid([solid, cyl])
+                if fused is not None:
+                    solid = fused
+                    pilot_sig.append((round(pr, 2), round(p_bot - part_t0, 2), round(p_top - part_t0, 2)))
+
+    # 3. Cut main coaxial central threaded/screw hole if present
+    hole_sig: Optional[tuple[float, float, float]] = None
+    if inner_holes:
+        hr, _harea, hz0, hz1 = inner_holes[0]
+        if 0.20 <= hr < r_in * 0.92 and (hz1 - hz0) >= 0.25 * total_h:
+            cut_t0 = (part_t0 - 0.20) if (hz0 - part_t0) <= max(0.45, 0.85 * hr) else hz0
+            cut_t1 = (part_t1 + 0.20) if (part_t1 - hz1) <= max(0.45, 0.85 * hr) else hz1
+            hole_cyl = BRepPrimAPI_MakeCylinder(
+                gp_Ax2(_local_pt(0.0, 0.0, cut_t0 - part_t0), _local_dir()),
+                float(hr),
+                float(cut_t1 - cut_t0),
+            ).Shape()
+            try:
+                cut = BRepAlgoAPI_Cut(solid, hole_cyl)
+                cut.SetRunParallel(True)
+                cut.Build()
+                if cut.IsDone():
+                    cand = cut.Shape()
+                    if not cand.IsNull() and _count_subshapes(cand, TopAbs_SOLID) == 1:
+                        solid = cand
+                        hole_sig = (round(hr, 2), round(cut_t0 - part_t0, 2), round(cut_t1 - part_t0, 2))
+            except Exception:
+                pass
+
+    try:
+        unify = ShapeUpgrade_UnifySameDomain(solid, True, True, False)
+        unify.Build()
+        unified = unify.Shape()
+        if not unified.IsNull() and _count_subshapes(unified, TopAbs_SOLID) == 1:
+            solid = unified
+    except Exception:
+        pass
+
+    if _count_subshapes(solid, TopAbs_SOLID) != 1 or not BRepCheck_Analyzer(solid).IsValid():
+        return None
+
+    # Use shared XCAF prototype instancing for canonical vertical Z-axis hex posts
+    proto_key: Optional[tuple] = None
+    proto_shape: Any = None
+    placement_trsf: Any = None
+    if axis_idx == 2:
+        proto_shape = solid
+        placement_trsf = gp_Trsf()
+        placement_trsf.SetTranslation(gp_Vec(uc, vc, part_t0))
+        final_shape = proto_shape.Located(TopLoc_Location(placement_trsf))
+        col_key = tuple(int(round(c * 255)) for c in color) if cfg.preserve_colors else None
+        phi_mod60 = round(math.degrees(phi0) % 60.0, 1)
+        proto_key = (
+            "hex",
+            comp.leaf_name or "",
+            round(r_in, 2),
+            phi_mod60,
+            round(t_hex0 - part_t0, 2),
+            round(t_hex1 - part_t0, 2),
+            tuple(pilot_sig),
+            hole_sig,
+            col_key,
+        )
+    else:
+        final_shape = solid
+
+    return PcbSimplifiedPart(
+        name=comp.name,
+        shape=final_shape,
+        color=color if cfg.preserve_colors else None,
+        category="hex_post",
+        ref_des=comp.ref_des,
+        leaf_name=comp.leaf_name,
+        original_bodies=len(comp.bodies),
+        original_faces=comp.total_faces,
+        simplified_faces=_count_subshapes(final_shape, TopAbs_FACE),
+        solid_count=1,
+        proto_key=proto_key,
+        proto_shape=proto_shape,
+        placement_trsf=placement_trsf,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cylindrical Component Detection & Simplification (Requirement 6)
 # ---------------------------------------------------------------------------
 
@@ -669,37 +1674,44 @@ def _analyze_cylinder_candidate(
     if max_dim < 0.5:
         return None
 
-    # Gather cylindrical faces weighted by approximate lateral area
+    # Gather OUTER (convex) cylindrical faces weighted by lateral area (ignore internal bores).
+    # Reuse cached body.surface_area instead of integrating every planar/BSpline/sphere face.
+    total_area = float(body.surface_area)
+    if total_area <= 1e-6:
+        return None
     cyl_faces: list[tuple[np.ndarray, np.ndarray, float, float]] = []  # (origin, dir, radius, area)
-    total_area = 0.0
+    min_dim = min(float(bsz[0]), float(bsz[1]), float(bsz[2]))
     exp = TopExp_Explorer(body.shape, TopAbs_FACE)
     while exp.More():
         face = to_face(exp.Current())
-        props = GProp_GProps()
-        BRepGProp.SurfaceProperties_s(face, props)
-        area = abs(float(props.Mass()))
-        total_area += area
         try:
             surf = BRepAdaptor_Surface(face, False)
-            if surf.GetType() == GeomAbs_Cylinder and area > 1e-6:
+            if surf.GetType() == GeomAbs_Cylinder:
                 cyl = surf.Cylinder()
                 r = float(cyl.Radius())
-                if r >= 0.25 * min(float(bsz[0]), float(bsz[1]), float(bsz[2])) or r >= 0.18 * max_dim:
-                    loc = cyl.Location()
-                    d = cyl.Axis().Direction()
-                    cyl_faces.append(
-                        (
-                            np.array([loc.X(), loc.Y(), loc.Z()], dtype=np.float64),
-                            np.array([d.X(), d.Y(), d.Z()], dtype=np.float64),
-                            r,
-                            area,
+                if r >= 0.25 * min_dim or r >= 0.18 * max_dim:
+                    if _is_cylinder_face_concave(face, cyl) is True:
+                        exp.Next()
+                        continue
+                    props = GProp_GProps()
+                    BRepGProp.SurfaceProperties_s(face, props)
+                    area = abs(float(props.Mass()))
+                    if area > 1e-6:
+                        loc = cyl.Location()
+                        d = cyl.Axis().Direction()
+                        cyl_faces.append(
+                            (
+                                np.array([loc.X(), loc.Y(), loc.Z()], dtype=np.float64),
+                                np.array([d.X(), d.Y(), d.Z()], dtype=np.float64),
+                                r,
+                                area,
+                            )
                         )
-                    )
         except Exception:
             pass
         exp.Next()
 
-    if not cyl_faces or total_area <= 1e-6:
+    if not cyl_faces:
         return None
 
     # Find dominant cylinder radius & axis direction (grouping coaxial cylinders)
@@ -714,11 +1726,17 @@ def _analyze_cylinder_candidate(
     aligned_area = 0.0
     weighted_r = 0.0
     weighted_orig = np.zeros(3, dtype=np.float64)
+    max_coaxial_r = dom_r
     for orig, d, r, area in cyl_faces:
-        if abs(float(np.dot(d, dom_dir))) > 0.98 and abs(r - dom_r) <= max(0.15, 0.12 * dom_r):
-            aligned_area += area
-            weighted_r += r * area
-            weighted_orig += orig * area
+        if abs(float(np.dot(d, dom_dir))) > 0.98:
+            off = orig - dom_orig
+            perp_off = float(np.linalg.norm(off - float(np.dot(off, dom_dir)) * dom_dir))
+            if perp_off <= max(0.15, 0.10 * dom_r):
+                max_coaxial_r = max(max_coaxial_r, r)
+            if abs(r - dom_r) <= max(0.15, 0.12 * dom_r):
+                aligned_area += area
+                weighted_r += r * area
+                weighted_orig += orig * area
 
     if aligned_area <= 0.0:
         return None
@@ -734,11 +1752,12 @@ def _analyze_cylinder_candidate(
     if height < 0.25 or radius < 0.25:
         return None
 
-    # Check radial bounding box perpendicular to axis is circular (aspect ~ 1.0)
+    # Check radial bounding box perpendicular to axis is circular (allow coaxial cylindrical flange)
     perp = rel - np.outer(t_vals, dom_dir)
     radii = np.linalg.norm(perp, axis=1)
     max_r = float(np.max(radii))
-    if max_r > radius * 1.28:
+    allowed_r = max(radius, max_coaxial_r) * 1.28
+    if max_r > allowed_r:
         # Significant non-cylindrical protrusion (e.g. square IC with a central round mark)
         return None
 
@@ -750,8 +1769,8 @@ def _analyze_cylinder_candidate(
     vol_ratio = body.volume / max(1e-6, full_cyl_vol)
 
     # Must genuinely be a cylindrical body (not a square box with rounded corners/fillets!)
-    min_lat_cov = max(0.50, circularity_min - 0.18)
-    if lat_coverage >= min_lat_cov and cyl_area_ratio >= 0.30 and 0.55 <= vol_ratio <= 1.20:
+    min_lat_cov = max(0.45, circularity_min - 0.22)
+    if lat_coverage >= min_lat_cov and cyl_area_ratio >= 0.28 and 0.40 <= vol_ratio <= 1.35:
         return (axis_pt, dom_dir, radius, t_min, t_max)
 
     return None
@@ -763,7 +1782,7 @@ def _try_simplify_as_cylinder(
     cfg: PcbSimplifyConfig,
     color: RGBColor,
 ) -> Optional[PcbSimplifiedPart]:
-    """Attempt to simplify a cylindrical component (electrolytic cap, can, radial inductor, etc.)."""
+    """Attempt to simplify a cylindrical component (electrolytic cap, can, radial inductor, turned post)."""
     if not cfg.detect_cylinders or not bodies:
         return None
 
@@ -784,19 +1803,44 @@ def _try_simplify_as_cylinder(
     axis_pt, axis_dir, radius, t_min, t_max = cyl_info
     cyl_h = max(0.1, t_max - t_min)
 
-    # Check if there is a noticeably wider flat square base plate (e.g., SMD electrolytic capacitor)
+    # Check coaxial outer flange/pilot steps and internal center hole on the cylindrical body
+    outer_cyls, inner_holes = _collect_coaxial_cylinders(
+        [cyl_body.shape],
+        axis_pt,
+        axis_dir,
+        axis_tol=max(0.15, 0.12 * radius),
+    )
+    extra_steps = [
+        (sr, sarea, st0, st1)
+        for (sr, sarea, st0, st1) in outer_cyls
+        if abs(sr - radius) > max(0.20, 0.12 * radius) and sr >= 0.30 and (st1 - st0) >= 0.25
+    ]
+    main_hole: Optional[tuple[float, float, float]] = None
+    if inner_holes:
+        hr, _harea, ht0, ht1 = inner_holes[0]
+        if 0.25 <= hr < radius * 0.90 and (ht1 - ht0) >= 0.25 * cyl_h:
+            main_hole = (hr, ht0, ht1)
+
+    # Check if there is a flat square/rectangular base plate under a vertical can (SMD electrolytic cap)
     base_bodies: list[PcbSubBody] = []
     if abs(float(axis_dir[2])) > 0.95 and len(bodies) > 1:
         comp_z_span = float(comp.bbox_max[2] - comp.bbox_min[2])
+        can_area = math.pi * radius * radius
         for b in bodies:
             if b is cyl_body:
                 continue
             bsz = b.bbox_size
-            # Flat base sitting near bottom of vertical can and noticeably wider than can diameter
-            is_wider = max(float(bsz[0]), float(bsz[1])) > (2.0 * radius * 1.08)
-            is_flat_base = float(bsz[2]) <= max(1.5, 0.40 * comp_z_span)
+            is_flat_base = float(bsz[2]) <= max(2.5, 0.40 * comp_z_span)
             near_bottom = float(b.bbox_min[2]) <= float(cyl_body.bbox_min[2]) + 0.5
-            if is_wider and is_flat_base and near_bottom:
+            if not (is_flat_base and near_bottom):
+                continue
+            # Square SMD base corners protrude radially beyond the circular can even when width ~= 2*r
+            b_pts = _collect_shape_points(b.shape)
+            max_rad = float(np.max(np.hypot(b_pts[:, 0] - axis_pt[0], b_pts[:, 1] - axis_pt[1])))
+            base_xy_area = float(bsz[0]) * float(bsz[1])
+            is_wider = max(float(bsz[0]), float(bsz[1])) > (2.0 * radius * 1.08)
+            is_square_base = (max_rad > radius * 1.04) and (base_xy_area >= 0.50 * can_area)
+            if is_wider or is_square_base:
                 base_bodies.append(b)
 
     # Build the cylinder solid (using prototype instancing when pure vertical cylinder)
@@ -806,29 +1850,9 @@ def _try_simplify_as_cylinder(
     proto_shape: Any = None
     placement_trsf: Any = None
 
-    if base_bodies:
-        # Compute local OBB box for the square base and fuse with cylinder (with 0.05 mm overlap)
-        base_pts = np.vstack([_collect_shape_points(b.shape) for b in base_bodies])
-        bcx, bcy, bw, bd, bang = _min_area_rect_2d(base_pts[:, :2])
-        bz0 = float(np.min([b.bbox_min[2] for b in base_bodies]))
-        bz1 = float(np.max([b.bbox_max[2] for b in base_bodies]))
-        base_box = _make_local_box(
-            -0.5 * bw, 0.5 * bw, -0.5 * bd, 0.5 * bd, bz0, bz1, (bcx, bcy), bang
-        )
+    has_extra_features = bool(base_bodies or extra_steps or main_hole)
 
-        # Extend cylinder downward slightly into base_box for guaranteed solid fusion
-        cyl_z_bot = min(float(start_pt[2]), bz1 - 0.05)
-        cyl_z_top = max(float(start_pt[2]) + cyl_h, bz1 + 0.1)
-        start_pt = np.array([axis_pt[0], axis_pt[1], cyl_z_bot], dtype=np.float64)
-        cyl_height = cyl_z_top - cyl_z_bot
-        ax2 = gp_Ax2(
-            gp_Pnt(float(start_pt[0]), float(start_pt[1]), float(start_pt[2])),
-            gp_Dir(float(axis_dir[0]), float(axis_dir[1]), float(axis_dir[2])),
-        )
-        cyl_shape = BRepPrimAPI_MakeCylinder(ax2, float(radius), float(cyl_height)).Shape()
-        fused = _fuse_primitives_to_single_solid([base_box, cyl_shape])
-        final_shape = fused if fused is not None else cyl_shape
-    elif abs(float(axis_dir[2])) > 0.995:
+    if not has_extra_features and abs(float(axis_dir[2])) > 0.995:
         # Canonical vertical cylinder at origin + translation -> shared XCAF prototype
         proto_shape = BRepPrimAPI_MakeCylinder(
             gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
@@ -841,11 +1865,95 @@ def _try_simplify_as_cylinder(
         col_key = tuple(int(round(c * 255)) for c in color) if cfg.preserve_colors else None
         proto_key = ("cyl", comp.leaf_name or "", round(float(radius), 2), round(float(cyl_height), 2), col_key)
     else:
+        primitives: list[TopoDS_Shape] = []
+        if base_bodies:
+            # Compute local OBB box for the square base and fuse with cylinder (with 0.05 mm overlap)
+            base_pts = np.vstack([_collect_shape_points(b.shape) for b in base_bodies])
+            bcx, bcy, bw, bd, bang = _min_area_rect_2d(base_pts[:, :2])
+            bz0 = float(np.min([b.bbox_min[2] for b in base_bodies]))
+            bz1 = float(np.max([b.bbox_max[2] for b in base_bodies]))
+            base_box = _make_local_box(
+                -0.5 * bw, 0.5 * bw, -0.5 * bd, 0.5 * bd, bz0, bz1, (bcx, bcy), bang
+            )
+            primitives.append(base_box)
+            cyl_z_bot = min(float(start_pt[2]), bz1 - 0.05)
+            cyl_z_top = max(float(start_pt[2]) + cyl_h, bz1 + 0.1)
+            start_pt = np.array([axis_pt[0], axis_pt[1], cyl_z_bot], dtype=np.float64)
+            cyl_height = cyl_z_top - cyl_z_bot
+
+        # When stepped coaxial flange/pilot exists, use dominant outer wall axial span for main cylinder
+        main_t0, main_t1 = t_min, t_max
+        if extra_steps and outer_cyls:
+            dom_outer = [
+                (sr, st0, st1)
+                for (sr, _sa, st0, st1) in outer_cyls
+                if abs(sr - radius) <= max(0.20, 0.12 * radius)
+            ]
+            if dom_outer:
+                main_t0 = min(x[1] for x in dom_outer)
+                main_t1 = max(x[2] for x in dom_outer)
+                # Snap to ends if within chamfer distance
+                if (main_t0 - t_min) <= max(0.35, 0.25 * radius):
+                    main_t0 = t_min
+                if (t_max - main_t1) <= max(0.35, 0.25 * radius):
+                    main_t1 = t_max
+                start_pt = axis_pt + axis_dir * main_t0
+                cyl_height = max(0.1, main_t1 - main_t0)
+
         ax2 = gp_Ax2(
             gp_Pnt(float(start_pt[0]), float(start_pt[1]), float(start_pt[2])),
             gp_Dir(float(axis_dir[0]), float(axis_dir[1]), float(axis_dir[2])),
         )
-        final_shape = BRepPrimAPI_MakeCylinder(ax2, float(radius), float(cyl_height)).Shape()
+        cyl_shape = BRepPrimAPI_MakeCylinder(ax2, float(radius), float(cyl_height)).Shape()
+        primitives.append(cyl_shape)
+
+        for sr, _sarea, st0, st1 in extra_steps:
+            # Snap ends & add slight overlap into main cylinder for guaranteed fusion
+            s_bot = t_min if (st0 - t_min) <= max(0.35, 0.25 * sr) else st0
+            s_top = t_max if (t_max - st1) <= max(0.35, 0.25 * sr) else st1
+            if s_top <= main_t0 + 0.05:
+                s_top = min(main_t1, main_t0 + 0.08)
+            elif s_bot >= main_t1 - 0.05:
+                s_bot = max(main_t0, main_t1 - 0.08)
+            if s_top - s_bot >= 0.15:
+                sp = axis_pt + axis_dir * s_bot
+                step_cyl = BRepPrimAPI_MakeCylinder(
+                    gp_Ax2(
+                        gp_Pnt(float(sp[0]), float(sp[1]), float(sp[2])),
+                        gp_Dir(float(axis_dir[0]), float(axis_dir[1]), float(axis_dir[2])),
+                    ),
+                    float(sr),
+                    float(s_top - s_bot),
+                ).Shape()
+                primitives.append(step_cyl)
+
+        fused = _fuse_primitives_to_single_solid(primitives) if len(primitives) > 1 else primitives[0]
+        final_shape = fused if fused is not None else cyl_shape
+
+        # Preserve significant coaxial central hole on hollow standoffs / terminals
+        if main_hole is not None:
+            hr, ht0, ht1 = main_hole
+            cut_t0 = (t_min - 0.20) if (ht0 - t_min) <= max(0.45, 0.85 * hr) else ht0
+            cut_t1 = (t_max + 0.20) if (t_max - ht1) <= max(0.45, 0.85 * hr) else ht1
+            hp = axis_pt + axis_dir * cut_t0
+            hole_cyl = BRepPrimAPI_MakeCylinder(
+                gp_Ax2(
+                    gp_Pnt(float(hp[0]), float(hp[1]), float(hp[2])),
+                    gp_Dir(float(axis_dir[0]), float(axis_dir[1]), float(axis_dir[2])),
+                ),
+                float(hr),
+                float(cut_t1 - cut_t0),
+            ).Shape()
+            try:
+                cut = BRepAlgoAPI_Cut(final_shape, hole_cyl)
+                cut.SetRunParallel(True)
+                cut.Build()
+                if cut.IsDone():
+                    cand = cut.Shape()
+                    if not cand.IsNull() and _count_subshapes(cand, TopAbs_SOLID) == 1:
+                        final_shape = cand
+            except Exception:
+                pass
 
     return PcbSimplifiedPart(
         name=comp.name,
@@ -1082,21 +2190,37 @@ def simplify_pcb_component(
         else None
     )
 
-    # 1. Try cylindrical simplification first (electrolytic capacitors, round cans, standoffs)
+    # 1. Compute component's tight 2D local OBB frame across ALL vertices (never truncated!)
+    all_pts = np.vstack([_collect_shape_points(b.shape) for b in bodies])
+    cx, cy, w, d, angle_rad = _min_area_rect_2d(all_pts[:, :2])
+    z_min = float(np.min([b.bbox_min[2] for b in bodies]))
+    z_max = float(np.max([b.bbox_max[2] for b in bodies]))
+    h_obb = max(0.05, z_max - z_min)
+    max_dim = max(w, d, h_obb)
+
+    # 2. Preserve & fuse low-complexity non-box components (headers, flanged terminals,
+    #    holed standoffs, low-face SMD caps with square base, jumpers, shunts)
+    preserved_part = _try_preserve_simple_component(
+        comp, bodies, (w, d, h_obb), cfg, color
+    )
+    if preserved_part is not None:
+        return preserved_part, removed_text
+
+    # 3. Simplify hexagonal standoffs/posts into clean hex prisms (+ pilot & center screw hole)
+    hex_part = _try_simplify_as_hex_post(comp, bodies, cfg, color or _DEFAULT_BODY_COLOR)
+    if hex_part is not None:
+        if not cfg.preserve_colors:
+            hex_part.color = None
+        return hex_part, removed_text
+
+    # 4. Try cylindrical simplification (electrolytic capacitors, round cans, turned standoffs)
     cyl_part = _try_simplify_as_cylinder(comp, bodies, cfg, color or _DEFAULT_BODY_COLOR)
     if cyl_part is not None:
         if not cfg.preserve_colors:
             cyl_part.color = None
         return cyl_part, removed_text
 
-    # 2. Compute component's tight 2D local OBB frame across ALL vertices (never truncated!)
-    all_pts = np.vstack([_collect_shape_points(b.shape) for b in bodies])
-    cx, cy, w, d, angle_rad = _min_area_rect_2d(all_pts[:, :2])
-    z_min = float(np.min([b.bbox_min[2] for b in bodies]))
-    z_max = float(np.max([b.bbox_max[2] for b in bodies]))
-    max_dim = max(w, d, z_max - z_min)
-
-    # 3. For larger / multi-pin IC & connector components, fuse body + heatsink + lead-bank boxes
+    # 5. For larger / multi-pin IC & connector components, fuse body + heatsink + lead-bank boxes
     is_multi_pin_candidate = (
         len(bodies) >= 2
         and (max_dim > cfg.small_part_box_mm or (len(bodies) >= 5 and max_dim >= 2.4))
@@ -1110,7 +2234,7 @@ def simplify_pcb_component(
                 fused_part.color = None
             return fused_part, removed_text
 
-    # 4. Compact SMD parts or guaranteed single-solid fallback -> tight local OBB rectangular box
+    # 6. Compact SMD parts or guaranteed single-solid fallback -> tight local OBB rectangular box
     # Canonicalize (pw >= pd) so 0/90/180/270-deg rotated identical SMD parts share 1 XCAF prototype!
     pw, pd, pang = max(0.05, w), max(0.05, d), angle_rad
     if pd > pw:
@@ -1182,25 +2306,35 @@ def simplify_pcb_assembly(
             f"Flat STEP detected: clustered into {len(components)} logical component group(s)."
         )
 
+    heatsink_indices = _detect_heatsink_indices(components, board_indices)
+
     for idx in board_indices:
         components[idx].is_board = True
+    for idx in heatsink_indices:
+        components[idx].is_heatsink = True
 
     board_comps = [c for c in components if c.is_board]
-    part_comps = [c for c in components if not c.is_board]
+    heatsink_comps = [c for c in components if c.is_heatsink]
+    part_comps = [c for c in components if not c.is_board and not c.is_heatsink]
     logs.append(
-        f"Detected {len(board_comps)} PCB board(s) and {len(part_comps)} mounted component(s) "
+        f"Detected {len(board_comps)} PCB board(s)"
+        + (f", {len(heatsink_comps)} heatsink(s)" if heatsink_comps else "")
+        + f", and {len(part_comps)} mounted component(s) "
         f"({orig_bodies} bodies, {orig_faces:,} faces)."
     )
 
     output_parts: list[PcbSimplifiedPart] = []
     board_count = 0
+    heatsink_count = 0
+    preserved_count = 0
+    hex_post_count = 0
     cylinder_count = 0
     fused_count = 0
     box_count = 0
     excluded_small_count = 0
     removed_text_total = 0
 
-    # 1. Clean PCB board substrate(s)
+    # 1. Clean PCB board substrate(s) — only apply hole deletion (< min_board_hole_mm)
     for b_idx, b_comp in enumerate(board_comps):
         if cancel_check and cancel_check():
             raise InterruptedError("Operation cancelled by user.")
@@ -1212,8 +2346,32 @@ def simplify_pcb_assembly(
         output_parts.append(b_part)
         board_count += 1
 
-    # 2. Simplify each mounted component into 1 watertight solid
+    # 1b. Preserve heatsink / thermal spreader component(s) intact
     step_footprints: list[StepComponentFootprint] = []
+    step_idx_to_part: dict[int, PcbSimplifiedPart] = {}
+
+    for h_comp in heatsink_comps:
+        if cancel_check and cancel_check():
+            raise InterruptedError("Operation cancelled by user.")
+        if progress_cb:
+            progress_cb(0.11, f"Preserving heatsink: {h_comp.name}")
+        h_part = _simplify_heatsink_component(h_comp, cfg)
+        if not cfg.preserve_colors:
+            h_part.color = None
+        fp_idx = len(step_footprints)
+        step_footprints.append(
+            StepComponentFootprint(
+                name=h_comp.name,
+                bbox_min=h_comp.bbox_min.copy(),
+                bbox_max=h_comp.bbox_max.copy(),
+                ref_des=h_comp.ref_des,
+            )
+        )
+        step_idx_to_part[fp_idx] = h_part
+        output_parts.append(h_part)
+        heatsink_count += 1
+
+    # 2. Simplify each mounted component into 1 watertight solid
     total_parts = max(1, len(part_comps))
     exclude_thr = max(0.0, float(cfg.exclude_small_part_mm))
 
@@ -1225,6 +2383,7 @@ def simplify_pcb_assembly(
             progress_cb(frac, f"Simplifying component {i + 1}/{len(part_comps)}: {comp.name}")
 
         # Always register original STEP footprint so IDF never re-adds an intentionally excluded part
+        fp_idx = len(step_footprints)
         step_footprints.append(
             StepComponentFootprint(
                 name=comp.name,
@@ -1247,18 +2406,25 @@ def simplify_pcb_assembly(
 
         simp_part, rm_txt = simplify_pcb_component(comp, cfg)
         removed_text_total += rm_txt
-        if simp_part.category == "cylinder":
+        if simp_part.category == "preserved":
+            preserved_count += 1
+        elif simp_part.category == "hex_post":
+            hex_post_count += 1
+        elif simp_part.category == "cylinder":
             cylinder_count += 1
         elif simp_part.category in ("ic_fused", "connector_fused"):
             fused_count += 1
         else:
             box_count += 1
 
+        step_idx_to_part[fp_idx] = simp_part
         output_parts.append(simp_part)
 
-    # 3. Optional IDF (.bdf/.ldf) missing component supplementation (NEVER replaces existing STEP parts)
+    # 3. Optional IDF (.bdf/.ldf) missing component supplementation (NEVER replaces existing STEP parts,
+    #    but IDF part names take priority over STEP names for matched parts!)
     idf_matched = 0
     idf_added = 0
+    idf_renamed = 0
     if cfg.use_idf_supplement and idf_data is not None:
         if cancel_check and cancel_check():
             raise InterruptedError("Operation cancelled by user.")
@@ -1277,7 +2443,7 @@ def simplify_pcb_assembly(
             else (0.35, 0.35, 0.38)
         )
         idf_color = _ensure_min_brightness(raw_idf_color, cfg.min_color_brightness)
-        added_parts, idf_matched, idf_added, _matched_names = supplement_missing_idf_parts(
+        added_parts, idf_matched, idf_added, matched_names = supplement_missing_idf_parts(
             idf_data,
             bmin,
             bmax,
@@ -1285,22 +2451,40 @@ def simplify_pcb_assembly(
             default_color=idf_color,
             exclude_small_part_mm=exclude_thr,
         )
+        # Prioritize IDF component names on STEP components matched in IDF
+        for fp_idx, idf_name in matched_names.items():
+            part_obj = step_idx_to_part.get(fp_idx)
+            if part_obj is not None and idf_name:
+                part_obj.name = idf_name
+                part_obj.leaf_name = ""
+                idf_renamed += 1
         if not cfg.preserve_colors:
             for ap in added_parts:
                 ap.color = None
         output_parts.extend(added_parts)
         logs.append(
             f"IDF ({idf_data.bdf_path.name if idf_data.bdf_path else 'IDF'}): "
-            f"{idf_matched} matched in STEP, {idf_added} missing component(s) added as boxes."
+            f"{idf_matched} matched in STEP ({idf_renamed} named from IDF), "
+            f"{idf_added} missing component(s) added as boxes."
         )
 
     simp_faces = sum(p.simplified_faces for p in output_parts)
     elapsed = time.perf_counter() - t0
     face_pct = (1.0 - simp_faces / max(1, orig_faces)) * 100.0
     kept_step_comps = len(part_comps) - excluded_small_count
+    cat_bits: list[str] = []
+    if heatsink_count:
+        cat_bits.append(f"{heatsink_count} heatsink(s)")
+    if preserved_count:
+        cat_bits.append(f"{preserved_count} preserved")
+    if hex_post_count:
+        cat_bits.append(f"{hex_post_count} hex post(s)")
+    cat_bits.append(f"{cylinder_count} cylinder(s)")
+    cat_bits.append(f"{fused_count} fused IC/connector(s)")
+    cat_bits.append(f"{box_count} box(es)")
     logs.append(
         f"Simplified {kept_step_comps}/{len(part_comps)} STEP component(s) -> "
-        f"{cylinder_count} cylinder(s), {fused_count} fused IC/connector(s), {box_count} box(es)"
+        + ", ".join(cat_bits)
         + (f", excluded {excluded_small_count} small part(s) <= {exclude_thr:g} mm" if excluded_small_count else "")
         + (f", +{idf_added} IDF box(es)" if idf_added else "")
         + (f", dropped {removed_text_total} text/marking body(ies)" if removed_text_total else "")
@@ -1315,7 +2499,10 @@ def simplify_pcb_assembly(
         root_name=assembly.root_name or assembly.source_path.stem,
         unit=assembly.unit,
         board_count=board_count,
+        heatsink_count=heatsink_count,
         component_count=kept_step_comps,
+        preserved_count=preserved_count,
+        hex_post_count=hex_post_count,
         cylinder_count=cylinder_count,
         fused_count=fused_count,
         box_count=box_count,

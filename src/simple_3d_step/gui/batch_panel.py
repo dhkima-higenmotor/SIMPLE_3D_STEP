@@ -26,7 +26,10 @@ from simple_3d_step.config import (
     get_default_config_path,
     launch_external_viewer,
     load_config,
+    remember_last_open_dir,
+    remember_last_save_dir,
     resolve_batch_workers,
+    resolve_last_open_dir,
     threads_per_batch_worker,
 )
 from simple_3d_step.core.worker import CadWorkerClient
@@ -479,6 +482,9 @@ class BatchPanel(tk.Frame):
             added += 1
 
         if added:
+            self._config.last_open_dir = remember_last_open_dir(
+                self._items[-1].path, self._config_path
+            )
             start = len(self._items) - added
             self._refresh_tree(selected=range(start, len(self._items)))
             self._log_panel.append_log(
@@ -493,9 +499,7 @@ class BatchPanel(tk.Frame):
     def add_files_dialog(self) -> None:
         if self._running:
             return
-        init_dir = self._config.last_open_dir
-        if not init_dir or not Path(init_dir).is_dir():
-            init_dir = str(Path.cwd())
+        init_dir = resolve_last_open_dir(self._config_path, fallback=self._config.last_open_dir)
         selected = filedialog.askopenfilenames(
             parent=self,
             title="Select STEP Files",
@@ -979,6 +983,7 @@ class BatchPanel(tk.Frame):
 
         if cmd_name == "save_result":
             saved = Path(res["output_path"])
+            self._config.last_save_dir = remember_last_save_dir(saved, self._config_path)
             size_mb = res["size_bytes"] / (1024 * 1024)
             item.output_path = saved
             item.status = ST_DONE

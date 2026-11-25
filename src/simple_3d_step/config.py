@@ -53,9 +53,11 @@ class AppConfig:
     # PCB Mode parameters (Altium STEP + IDF simplification)
     pcb_simplify_leads: bool = True
     pcb_detect_cylinders: bool = True
+    pcb_detect_hex_posts: bool = True
     pcb_cylinder_circularity_min: float = 0.80
     pcb_remove_text_features: bool = True
     pcb_small_part_box_mm: float = 4.0
+    pcb_preserve_simple_max_faces: int = 55
     pcb_preserve_colors: bool = True
     pcb_use_idf_supplement: bool = True
     pcb_keep_board_holes: bool = True
@@ -210,6 +212,92 @@ def save_config(config: AppConfig, config_path: Optional[Path] = None) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def resolve_last_open_dir(
+    config_path: Optional[Path] = None,
+    fallback: Optional[str] = None,
+) -> str:
+    """Return the most recently opened STEP directory persisted in config.json (or cwd)."""
+    candidates: list[str] = []
+    path = config_path or get_default_config_path()
+    if path.is_file():
+        try:
+            fresh = load_config(path)
+            if fresh.last_open_dir:
+                candidates.append(fresh.last_open_dir)
+        except Exception:
+            pass
+    if fallback:
+        candidates.append(fallback)
+
+    for raw in candidates:
+        try:
+            p = Path(raw).expanduser()
+            if p.is_dir():
+                return str(p)
+        except OSError:
+            continue
+    return str(Path.cwd())
+
+
+def remember_last_open_dir(
+    step_path: str | Path,
+    config_path: Optional[Path] = None,
+) -> str:
+    """Persist the directory of the most recently opened STEP file into config.json."""
+    target = Path(step_path).expanduser().resolve()
+    folder = target if target.is_dir() else target.parent
+    folder_str = str(folder)
+    path = config_path or get_default_config_path()
+    cfg = load_config(path)
+    if cfg.last_open_dir != folder_str:
+        cfg.last_open_dir = folder_str
+        save_config(cfg, path)
+    return folder_str
+
+
+def resolve_last_save_dir(
+    config_path: Optional[Path] = None,
+    fallback: Optional[str] = None,
+) -> str:
+    """Return the most recently used save directory persisted in config.json (or fallback/cwd)."""
+    candidates: list[str] = []
+    path = config_path or get_default_config_path()
+    if path.is_file():
+        try:
+            fresh = load_config(path)
+            if fresh.last_save_dir:
+                candidates.append(fresh.last_save_dir)
+        except Exception:
+            pass
+    if fallback:
+        candidates.append(fallback)
+
+    for raw in candidates:
+        try:
+            p = Path(raw).expanduser()
+            if p.is_dir():
+                return str(p)
+        except OSError:
+            continue
+    return str(Path.cwd())
+
+
+def remember_last_save_dir(
+    output_path: str | Path,
+    config_path: Optional[Path] = None,
+) -> str:
+    """Persist the directory of the most recently saved STEP file into config.json."""
+    target = Path(output_path).expanduser().resolve()
+    folder = target if target.is_dir() else target.parent
+    folder_str = str(folder)
+    path = config_path or get_default_config_path()
+    cfg = load_config(path)
+    if cfg.last_save_dir != folder_str:
+        cfg.last_save_dir = folder_str
+        save_config(cfg, path)
+    return folder_str
 
 
 def launch_external_viewer(step_file: Path, config: AppConfig) -> str:
