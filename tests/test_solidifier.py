@@ -17,10 +17,15 @@ from OCP.TopoDS import TopoDS_Shell
 
 from simple_3d_step.core.solidifier import (
     _audit_prs_closed_meshing,
+    _batch_fuse_safe,
+    _collapse_sub_precision_edges,
     _count_lacking_wires,
     _extract_solids,
+    _heal_non_manifold_topology,
+    _inspect_manifold_topology,
     _purge_final_closed_void_shells,
     _remove_closed_void_shells,
+    _sanitize_for_step_compat,
     _split_tangent_pinch_wire_faces,
     simplify_assembly_to_single_solid,
 )
@@ -210,3 +215,110 @@ def test_tangent_pinch_wire_hole_healed_for_cad_assistant() -> None:
     failed_profiles, failing_faces = _audit_prs_closed_meshing(repaired, fast=False)
     assert failed_profiles == 0
     assert not failing_faces
+
+
+def test_heal_non_manifold_edge_and_vertex_for_solidworks(tmp_path: Path) -> None:
+    """Zero-thickness 4-face non-manifold edges and pinched vertices heal to strict 2-manifold."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    # Case 1: Two cubes touching strictly along edge (X=10, Z=10, Y in [0, 10]) -> 4-face NM edge
+    b1 = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).Solid()
+    b2 = BRepPrimAPI_MakeBox(gp_Pnt(10.0, 0.0, 10.0), 10.0, 10.0, 10.0).Solid()
+    # Add a rear connecting bridge at Y in [-4, 0] so they form a single solid with the NM edge
+    bridge = BRepPrimAPI_MakeBox(gp_Pnt(0.0, -4.0, 0.0), 20.0, 4.0, 20.0).Solid()
+    fused1 = BRepAlgoAPI_Fuse(b1, b2).Shape()
+    fused2 = BRepAlgoAPI_Fuse(fused1, bridge).Shape()
+    solid_nm = _extract_solids(fused2)[0]
+
+    m_before = _inspect_manifold_topology(solid_nm)
+    assert len(m_before.nm_edges) >= 1
+    vol_before = validate_shape(solid_nm).volume
+
+    logs: list[str] = []
+    sanitized = _sanitize_for_step_compat(solid_nm, logs)
+    out_step = save_shape_to_step(sanitized, tmp_path / "nm_healed.step")
+    reloaded = load_step_assembly(out_step).parts[0].shape
+
+    rep = validate_shape(reloaded)
+    m_after = _inspect_manifold_topology(reloaded)
+    assert rep.solid_count == 1
+    assert rep.shell_count == 1
+    assert rep.is_watertight is True
+    assert rep.is_valid is True
+    assert len(m_after.nm_edges) == 0
+    assert len(m_after.nm_verts) == 0
+    assert m_after.internal_edge_count == 0
+    assert abs(rep.volume - vol_before) / vol_before < 0.005
+    failed_profiles, failing_faces = _audit_prs_closed_meshing(reloaded, fast=False)
+    assert failed_profiles == 0
+    assert not failing_faces
+
+    # Case 2: Pinched non-manifold vertex where two cubes meet strictly at corner (10, 10, 10)
+    c1 = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).Solid()
+    c2 = BRepPrimAPI_MakeBox(gp_Pnt(10.0, 10.0, 10.0), 10.0, 10.0, 10.0).Solid()
+    # Connect elsewhere via an exterior U-arm away from (10, 10, 10)
+    arm1 = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, 0.0, 0.0), 4.0, 20.0, 20.0).Solid()
+    arm2 = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, 12.0, 12.0), 16.0, 8.0, 8.0).Solid()
+    v_shape = BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(c1, c2).Shape(), BRepAlgoAPI_Fuse(arm1, arm2).Shape()).Shape()
+    solid_v = _extract_solids(v_shape)[0]
+    mv_before = _inspect_manifold_topology(solid_v)
+    assert len(mv_before.nm_verts) >= 1
+
+    logs_v: list[str] = []
+    healed_v = _heal_non_manifold_topology(solid_v, logs_v)
+    mv_after = _inspect_manifold_topology(healed_v)
+    rep_v = validate_shape(healed_v)
+    assert rep_v.solid_count == 1
+    assert rep_v.is_valid is True
+    assert len(mv_after.nm_edges) == 0
+    assert len(mv_after.nm_verts) == 0
+
+
+def test_sub_parasolid_precision_edge_eliminated_and_step_uncertainty_capped(tmp_path: Path) -> None:
+    """Sub-1e-5 mm mating edges (below Parasolid precision) are eliminated without tolerance bloat."""
+    # Two overlapping boxes misaligned by 5e-6 mm in Z -> fuzzy=0.0 creates 5e-6 mm vertical edges
+    b1 = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 20.0, 10.0).Solid()
+    b2 = BRepPrimAPI_MakeBox(gp_Pnt(10.0, 5.0, 0.0), 20.0, 10.0, 10.0 + 5e-6).Solid()
+
+    logs: list[str] = []
+    fused = _batch_fuse_safe([b1, b2], logs, label="Micro-offset test")
+    sanitized = _sanitize_for_step_compat(fused, logs)
+    out_step = save_shape_to_step(sanitized, tmp_path / "micro_edge_clean.step")
+
+    step_txt = out_step.read_text(encoding="latin-1", errors="ignore")
+    unc_match = re.search(
+        r"UNCERTAINTY_MEASURE_WITH_UNIT\s*\(\s*LENGTH_MEASURE\s*\(\s*([0-9.eE+-]+)\s*\)",
+        step_txt,
+    )
+    assert unc_match is not None
+    unc_val = float(unc_match.group(1))
+
+    reloaded = load_step_assembly(out_step).parts[0].shape
+    rep = validate_shape(reloaded)
+    m_fin = _inspect_manifold_topology(reloaded)
+    assert rep.solid_count == 1
+    assert rep.shell_count == 1
+    assert rep.is_valid is True
+    assert m_fin.sub_parasolid_count == 0
+    assert m_fin.tiny_edge_count == 0
+    assert m_fin.min_edge_len >= 5e-5
+    assert unc_val <= 0.5 * m_fin.min_edge_len
+
+
+def test_thin_valid_feature_not_bloated_by_fix_small_face() -> None:
+    """Real 0.010 mm step features must NOT be collapsed into 5e-3 mm gaps by FixSmallFace."""
+    base = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).Solid()
+    # Real 0.010 mm step (10 microns) on top — meshes cleanly and must stay intact
+    step = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 10.0), 5.0, 10.0, 0.010).Solid()
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    solid = _extract_solids(BRepAlgoAPI_Fuse(base, step).Shape())[0]
+    logs: list[str] = []
+    sanitized = _sanitize_for_step_compat(solid, logs)
+    rep = validate_shape(sanitized)
+    m = _inspect_manifold_topology(sanitized)
+    assert rep.solid_count == 1
+    assert rep.is_valid is True
+    assert m.max_edge_tol < 1e-3
+    assert len(m.nm_edges) == 0
+    assert m.sub_parasolid_count == 0

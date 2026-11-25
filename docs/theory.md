@@ -688,12 +688,23 @@ Otherwise the pre-unification shape is kept.
 
 ## 5. Cross-kernel STEP normalization
 
-The final shape must survive a round trip through other kernels, not just OCCT 8.x. Most
-"solid becomes surface" complaints from OCCT 7.x viewers (e.g. CAD Assistant) come from
-three defects: periodic seam pcurves, loose `UNCERTAINTY`, and faces that BRepMesh cannot
-triangulate. Each is treated explicitly.
+The final shape must survive a round trip through both **Parasolid (SolidWorks)** and **OCCT 7.x viewers (CAD Assistant)**, not just OCCT 8.x. Most "solid becomes surface" failures come from two complementary kernel strictness regimes:
 
-### 5.1 Periodic surface splitting and wire healing
+- **Parasolid / SolidWorks manifold-solid strictness:** rejects `MANIFOLD_SOLID_BREP` shells containing non-manifold edges ($>2$ incident faces, e.g. zero-thickness checkerboard contacts), pinched non-manifold vertices ($>1$ edge-connected face fan), `TopAbs_INTERNAL` tangency-slit edges (which STEP AP214 drops, leaving self-intersecting faces), sub-precision edges shorter than Parasolid's linear resolution ($10^{-8}\text{ m} = 10^{-5}\text{ mm}$), or bloated multi-micron curve-to-surface gaps created by over-aggressive sliver removal.
+- **OCCT 7.x / CAD Assistant meshing strictness:** downgrades a solid to *Opened* if periodic seam pcurves are lacking, STEP `UNCERTAINTY` is loose, or even one face yields a NULL triangulation in `BRepMesh`.
+
+Each defect class is treated explicitly under strict volume, validity, and tolerance guards.
+
+### 5.1 Strict 2-manifold healing and Parasolid edge precision
+
+1. **Boolean internal-slit & sub-precision guard (`_batch_fuse_safe`, `_fuse_two_safe`).**
+   After exact $\text{fuzzy}=0$ fusion succeeds, an $O(N)$ outer-shell audit inspects `TopAbs_INTERNAL` edges and sub-Parasolid edges ($L < 10^{-5}\text{ mm}$). Only when such defects appear (typically from nanometer-scale NURBS-to-cylinder tangency overlaps or mating noise) does the fuse retry at ultra-tight $\text{fuzzy} \in \{5\times 10^{-5},\, 10^{-4}\}\text{ mm}$, upgrading only if `BRepCheck` validity is preserved and the defect tuple strictly decreases.
+2. **Non-manifold edge & vertex healing (`_heal_non_manifold_topology`).**
+   Before periodic splitting, an $O(N)$ topology pass locates every non-degenerated edge with $>2$ incident faces and every pinched vertex whose incident faces partition into $>1$ edge-connected fan. Each zero-thickness contact is bridged by fusing a microscopic analytic capsule/pipe or sphere ($r = 0.05\text{ mm}$, escalating once to $0.10\text{ mm}$ only for stubborn grazing angles), followed by void-shell purging and outward orientation. Volume change is negligible ($<0.01\%$) while the boundary becomes strictly 2-manifold.
+3. **Sub-Parasolid edge collapse (`_collapse_sub_precision_edges`).**
+   After 3D-curve STEP normalization, any remaining non-degenerated edge shorter than $5\times 10^{-5}\text{ mm}$ (5× Parasolid's $10^{-5}\text{ mm}$ resolution) is collapsed via `ShapeFix_Wireframe.FixSmallEdges()` (`precision=5e-5`, `maxTolerance=1e-4`), guarded so maximum edge tolerance never bloats.
+
+### 5.2 Periodic surface splitting and wire healing
 
 A full-revolution cylinder/cone/torus has a periodic parameter $u\in[0,2\pi]$ whose seam
 is represented by a degenerate pcurve. When a reader rebuilds pcurves from 3D curves, the
@@ -709,24 +720,25 @@ The transformation is accepted only if it preserves solids, does not increase sh
 stays watertight, keeps volume within 1 %, and does not increase the count of
 `CheckLacking` wire defects.
 
-### 5.2 pcurve-free round trip and precision clamping
+### 5.3 pcurve-free round trip and precision clamping
 
 The writer configures OCCT to export **3D curves only**:
 
 ```
 write.surfacecurve.mode = 0     # no pcurves; readers recompute them from 3D geometry
 write.precision.mode    = 2     # user-defined uncertainty
-write.precision.val     = clamp(avg_tolerance, 1e-5, 1e-3)
+write.precision.val     = clamp(avg_tolerance, 1e-5, min(1e-3, 0.5 * min_edge_len))
 ```
 
-where `avg_tolerance` comes from `ShapeAnalysis_ShapeTolerance`. The clamp matters: a
+where `avg_tolerance` comes from `ShapeAnalysis_ShapeTolerance` and `min_edge_len` is the
+shortest non-degenerated edge length (when $0.5\,L_{\min}\ge 10^{-5}$). The clamp matters: a
 derived value of $10^{-2}$ mm lets readers collapse fine edges and coarse-facet the model,
-while a forced $10^{-5}$ mm can exceed the geometric validity of Boolean output. The shape
-is then re-imported from that temporary STEP (`_normalize_via_step_3d_curves`) so the
-in-memory shape has **exactly the pcurves and tolerances an external viewer will see** —
+while capping below $0.5\,L_{\min}$ prevents Parasolid/SolidWorks from collapsing valid short
+edges. The shape is then re-imported from that temporary STEP (`_normalize_via_step_3d_curves`)
+so the in-memory shape has **exactly the pcurves and tolerances an external viewer will see** —
 stale in-memory pcurves cannot mask portability problems.
 
-### 5.3 Mesh-blocking slivers, tangent pinch-wires, and clipping capping
+### 5.4 Mesh-blocking slivers, tangent pinch-wires, and clipping capping
 
 OCCT's shaded-solid exploration classifies a solid as *Opened* if even one face yields a
 NULL triangulation at the viewer's deflection. The audit reproduces CAD Assistant's
@@ -738,12 +750,15 @@ profiles:
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
 ```
 
-If any face fails, three staged repairs are attempted in order, each guarded by the same
-validity, watertightness, void-shell, and volume checks:
+The audit runs **first**; if zero faces fail, the shape is returned untouched so real thin
+features (e.g. 0.01 mm connector steps) are never collapsed or tolerance-bloated. Only if a
+face fails are three staged repairs attempted in order, each guarded by validity,
+watertightness, void-shell, volume, non-manifold, and edge-tolerance checks:
 
-1. **Microscopic sliver collapse (Step A).** `ShapeFix_FixSmallFace` with precision
-   0.015 mm collapses razor-thin tangent slivers (from Boolean intersections) that cannot
-   be triangulated.
+1. **Progressive tight sliver collapse (Step A).** `ShapeFix_FixSmallFace` escalates gently
+   over $(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ and is accepted only
+   when unmeshed faces strictly decrease and maximum edge tolerance stays within
+   $\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$.
 2. **Exact curved-edge midpoint splitting (Step B).** Long curved edges are split **only
    on failing faces** (`_split_edge_exact_subedges`): the sub-edges lie on the same 3D
    curve, so geometric error is exactly zero, while the maximum chord sagitta of the
@@ -787,7 +802,7 @@ validity, watertightness, void-shell, and volume checks:
    the exact original plane, preserving volume and surface area identically while
    guaranteeing 100 % closed-solid rendering and clipping-plane capping in CAD Assistant.
 
-### 5.4 Final validation
+### 5.5 Final validation
 
 `validate_shape` reports exact B-Rep metrics:
 

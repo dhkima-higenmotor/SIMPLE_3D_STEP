@@ -9,7 +9,7 @@ from typing import Optional
 
 import numpy as np
 from OCP.Bnd import Bnd_Box
-from OCP.BRep import BRep_Builder
+from OCP.BRep import BRep_Builder, BRep_Tool
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepTools import BRepTools
@@ -27,7 +27,7 @@ from OCP.TCollection import TCollection_ExtendedString
 from OCP.TDataStd import TDataStd_Name
 from OCP.TDF import TDF_Label
 from OCP.TDocStd import TDocStd_Document
-from OCP.TopAbs import TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
@@ -36,6 +36,7 @@ from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
 
 from simple_3d_step.core.occt_compat import (
     LabelSequence as TDF_LabelSequence,
+    to_edge,
     to_shell,
     to_solid,
 )
@@ -318,9 +319,23 @@ def save_shape_to_step(
     Interface_Static.SetIVal_s("write.surfacecurve.mode", 0)
     # Compute average shape tolerance and clamp to [1e-5, 1e-3] (matches SolidWorks 1e-5 on
     # clean geometry and prevents mode=1/Max from bloating UNCERTAINTY to 1e-2 and collapsing
-    # sub-0.01 mm edges in OCCT 7.x STEP readers).
+    # sub-0.01 mm edges in OCCT 7.x STEP readers). Also cap UNCERTAINTY at <= 0.5 * shortest
+    # edge length (when >= 1e-5) so Parasolid/SolidWorks never collapses valid short edges.
     avg_tol = float(ShapeAnalysis_ShapeTolerance().Tolerance(shape, 0))
     clamped_prec = max(1e-5, min(1e-3, avg_tol))
+    min_edge_len = float("inf")
+    exp_e = TopExp_Explorer(shape, TopAbs_EDGE)
+    while exp_e.More():
+        ed = to_edge(exp_e.Current())
+        if not BRep_Tool.Degenerated_s(ed):
+            lp = GProp_GProps()
+            BRepGProp.LinearProperties_s(ed, lp)
+            elen = abs(float(lp.Mass()))
+            if 0.0 < elen < min_edge_len:
+                min_edge_len = elen
+        exp_e.Next()
+    if min_edge_len < float("inf") and 0.5 * min_edge_len >= 1e-5:
+        clamped_prec = min(clamped_prec, 0.5 * min_edge_len)
     Interface_Static.SetIVal_s("write.precision.mode", 2)
     Interface_Static.SetRVal_s("write.precision.val", clamped_prec)
 

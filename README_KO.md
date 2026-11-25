@@ -6,6 +6,15 @@
 
 내부 부품(모터 로터·스테이터, 기어, 베어링, PCB, 내부 체결부품 등)까지 모두 포함된 복잡한 3D STEP 어셈블리 파일을 **단일 Watertight Solid Body STEP 파일**로 단순화하는 데스크톱/CLI 도구입니다. **외부에서 보이지 않는 내부 부품을 자동 식별·삭제**하고, **외관 B-Rep CAD 형상(평면·원통·원추·토러스·필렛·방열핀·체결홀 등)을 100% 원본 그대로 보존**한 채 해석적 B-Rep 코어로 내부 빈 공간을 채우고 밀폐 내부 공동(Closed Void Shell)을 완전 제거하여, 다양한 CAD 커널의 단면(Clipping Plane) 뷰에서도 속이 꽉 찬 솔리드로 표시되도록 변환합니다.
 
+## 핵심 기능 한눈에 보기 (변환 전 / 후)
+
+![변환 전후 단면 비교: 복잡한 다부품 STEP 어셈블리가 외관 100% 보존 및 내부 완전 충진 단일 Solid Body로 변환된 모습](docs/screenshots/function.png)
+
+> **왼쪽 (`원본 어셈블리 STEP`) → 오른쪽 (`단순화 단일 Solid STEP`)** 단면 절단(Clipping Plane) 비교:
+> - **내부 설계 기밀 자동 보호 (IP Protection)**: 외부에서 보이지 않는 내부 부품(PCB, 모터 권선·코일, 마그넷, 베어링, 샤프트, 기어, 내부 볼트 등)을 자동 판별·제거하여 외부 공유 시 내부 구조 유출을 원천 차단합니다.
+> - **외관 B-Rep CAD 형상 100% 원본 보존**: 하우징 외경, 모따기, 체결부, 외부 커넥터 포트 등 모든 외관 곡면을 삼각 메쉬/복셀 왜곡 없이 정확한 해석적 B-Rep 곡면 그대로 유지합니다.
+> - **속이 완전히 꽉 찬 단일 Solid Body & 대폭 경량화**: 모든 내부 빈 공간과 폐쇄 공동을 제거한 엄격한 2-매니폴드 단일 솔리드(`Solid 1 / Shell 1`)를 생성하여 **SolidWorks**, **eDrawings**, **FreeCAD**, **OpenCASCADE CAD Assistant** 모두에서 단면 캡핑까지 정상 Solid로 열리며, STEP 파일 크기도 대폭 줄어듭니다(일반적으로 **85~95% 경량화**).
+
 ---
 
 ## GUI 화면
@@ -44,7 +53,7 @@
 - **외벽 안쪽 해석적 B-Rep 내부 코어**: 외피에서 안전 여백(`core_inset_mm`) 안쪽 영역에 멀티스레드 Embree 3축 점유 스윕과 26방향 하늘 가시성 보호(방열핀 골짜기·외부 홈 유출 방지)를 적용하고, 동일 단면 연속 슬랩 병합 및 보수적 동축 원통 병합으로 불필요한 내부 분할을 줄인 해석적 원통(`MakeCylinder`)·다각 프리즘(`MakePrism`) 코어를 생성합니다.
 - **정밀 우선 Boolean Fuse**: `fuzzy=0.0` 병렬 다중 도구 결합을 우선 시도하고 부피 보존 검증을 수행해 SolidWorks·CATIA·NX의 미세 필렛과 탄젠트 엣지 손상을 방지하며, 폴백 시 공간 근접 기반 균형 이진 트리($O(N \log N)$) 병합을 사용합니다.
 - **밀폐 내부 공동(Closed Void Shell) 완전 제거**: 최종 후처리 단계에서 다중 쉘 내부 공동(`BRepClass3d.OuterShell_s` + `BRepBuilderAPI_MakeSolid`)뿐만 아니라 단일 쉘 내부에 숨어 있는 비연결 내부 공동 컴포넌트(고속 `Face→Edge` 인덱스 인접 그래프 BFS)까지 모두 소거하여, 단면 절단 시 속이 완전히 꽉 찬 솔리드를 보장합니다.
-- **이종 CAD 커널 및 OpenCASCADE CAD Assistant 호환성**: 3D 커브 기반 STEP 정규화, 정밀도 허용 오차 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, `ShapeFix_FixSmallFace` 미세 슬리버 정리, 무왜곡 곡선 엣지 분할, 자동 **내접 핀치 와이어 홀 분할**(외곽 경계에 내접하는 내부 홀에서 발생하는 OCCT `IMeshData_SelfIntersectingWire` 삼각화 실패 해소), 병렬 `BRepCheck_Analyzer` 검증을 적용하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 단면 캡핑까지 정상 Solid로 표시됩니다.
+- **이종 CAD 커널 SolidWorks(Parasolid) 및 OpenCASCADE CAD Assistant 호환성**: 엄격한 2-매니폴드 솔리드 위상과 Parasolid 정밀도(`>= 1e-5 mm`)를 보장하기 위해 Boolean 탄젠트 슬릿(`TopAbs_INTERNAL` 엣지) 자동 감지 및 초정밀 `5e-5`–`1e-4` fuzzy 재시도, 비매니폴드 제로-두께(4면 교차) 엣지 및 핀치 정점의 미세 해석적 비드(`r = 0.05 mm`) 힐링, 정밀도 미만 미세 엣지(`< 5e-5 mm`) 정리, 최단 엣지 길이의 절반 이하로 상한을 맞춘 STEP `UNCERTAINTY` 클램핑(`1e-5`–`1e-3`), `ShapeUpgrade_ShapeDivideClosed` 주기 곡면 분할, 공차 팽창 방지 가드가 적용된 `ShapeFix_FixSmallFace` 슬리버 정리, 무왜곡 곡선 엣지 분할, 자동 **내접 핀치 와이어 홀 분할**, 병렬 `BRepCheck_Analyzer` 검증을 수행하여 SolidWorks, eDrawings, FreeCAD, OpenCASCADE CAD Assistant(OCCT 7.x) 모두에서 깨짐 없이 단면 캡핑까지 정상 Solid Body로 열립니다.
 - **공차 분리 외관 부품 연결 및 동일 곡면 통합**: 멀티스레드 `cKDTree(workers=-1)` 탐색으로 미세 공차로 떠 있는 외관 부품(커넥터·볼트 등)을 숨겨진 내부 B-Rep 핀으로 연결하고 `ShapeUpgrade_UnifySameDomain`으로 동일 평면·곡면을 통합합니다.
 
 ### 4. 프리징 없는 Slate + Indigo GUI (`tkinter` / `ttk`) 및 멀티코어 배치 풀

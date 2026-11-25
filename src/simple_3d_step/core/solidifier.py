@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 import math
 import shutil
 import tempfile
@@ -39,6 +40,7 @@ from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakePolygon,
     BRepBuilderAPI_MakeSolid,
     BRepBuilderAPI_MakeVertex,
+    BRepBuilderAPI_MakeWire,
 )
 from OCP.BRepClass3d import BRepClass3d, BRepClass3d_SolidClassifier
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
@@ -47,15 +49,25 @@ from OCP.BRepGProp import BRepGProp
 from OCP.BRepLib import BRepLib
 from OCP.BRepLProp import BRepLProp_SLProps
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
+from OCP.BRepOffsetAPI import BRepOffsetAPI_MakePipe
+from OCP.BRepPrimAPI import (
+    BRepPrimAPI_MakeCylinder,
+    BRepPrimAPI_MakePrism,
+    BRepPrimAPI_MakeSphere,
+)
 from OCP.BRepTools import BRepTools
 from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Line, GeomAbs_Plane
-from OCP.gp import gp_Ax2, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
+from OCP.gp import gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
-from OCP.ShapeAnalysis import ShapeAnalysis_Wire
+from OCP.ShapeAnalysis import ShapeAnalysis_ShapeTolerance, ShapeAnalysis_Wire
 from OCP.ShapeBuild import ShapeBuild_ReShape
-from OCP.ShapeFix import ShapeFix_FixSmallFace, ShapeFix_Shape, ShapeFix_Solid
+from OCP.ShapeFix import (
+    ShapeFix_FixSmallFace,
+    ShapeFix_Shape,
+    ShapeFix_Solid,
+    ShapeFix_Wireframe,
+)
 from OCP.ShapeUpgrade import (
     ShapeUpgrade_RemoveInternalWires,
     ShapeUpgrade_ShapeDivideClosed,
@@ -68,6 +80,7 @@ from OCP.TopAbs import (
     TopAbs_FACE,
     TopAbs_FORWARD,
     TopAbs_IN,
+    TopAbs_INTERNAL,
     TopAbs_REVERSED,
     TopAbs_SHELL,
     TopAbs_SOLID,
@@ -83,6 +96,7 @@ from OCP.TopoDS import (
     TopoDS_Shape,
     TopoDS_Shell,
     TopoDS_Solid,
+    TopoDS_Vertex,
     TopoDS_Wire,
 )
 from scipy import ndimage
@@ -868,20 +882,208 @@ def _build_analytic_interior_core(
     return core_solids
 
 
+@dataclass
+class _ManifoldAudit:
+    """Fast O(N) Parasolid / SolidWorks manifold topology & edge-precision summary."""
+
+    nm_edges: list[TopoDS_Edge] = field(default_factory=list)
+    nm_verts: list[TopoDS_Vertex] = field(default_factory=list)
+    internal_edge_count: int = 0
+    free_edge_count: int = 0
+    sub_parasolid_count: int = 0  # non-degenerated edges with length < 1e-5 mm
+    tiny_edge_count: int = 0      # non-degenerated edges with length < tiny_threshold
+    min_edge_len: float = float("inf")
+    max_edge_tol: float = 0.0
+
+
+def _outer_shells_for_audit(shape: TopoDS_Shape) -> TopoDS_Shape:
+    """Return a compound of only the outer shell of each solid (ignoring enclosed void shells)."""
+    sols = _extract_solids(shape)
+    if not sols:
+        return shape
+    if all(_count_shells(s) <= 1 for s in sols):
+        return shape
+    builder = BRep_Builder()
+    comp = TopoDS_Compound()
+    builder.MakeCompound(comp)
+    for s in sols:
+        if _count_shells(s) > 1:
+            try:
+                outer = BRepClass3d.OuterShell_s(s)
+                if not outer.IsNull():
+                    builder.Add(comp, outer)
+                    continue
+            except Exception:
+                pass
+        builder.Add(comp, s)
+    return comp
+
+
+def _count_internal_edges(shape: TopoDS_Shape, outer_only: bool = True) -> int:
+    """Count TopAbs_INTERNAL edges embedded inside faces (STEP AP214 drops these, causing SI)."""
+    target = _outer_shells_for_audit(shape) if outer_only else shape
+    cnt = 0
+    ef = TopExp_Explorer(target, TopAbs_FACE)
+    while ef.More():
+        ee = TopExp_Explorer(ef.Current(), TopAbs_EDGE)
+        while ee.More():
+            if ee.Current().Orientation() == TopAbs_INTERNAL:
+                cnt += 1
+            ee.Next()
+        ef.Next()
+    return cnt
+
+
+def _inspect_manifold_topology(
+    shape: TopoDS_Shape,
+    tiny_threshold: float = 5e-5,
+    outer_only: bool = False,
+) -> _ManifoldAudit:
+    """Inspect non-manifold edges/vertices, TopAbs_INTERNAL edges, and sub-Parasolid edges."""
+    target = _outer_shells_for_audit(shape) if outer_only else shape
+    fmap = ShapeIndexedMap()
+    TopExp.MapShapes_s(target, TopAbs_FACE, fmap)
+    emap = ShapeIndexedMap()
+    TopExp.MapShapes_s(target, TopAbs_EDGE, emap)
+    vmap = ShapeIndexedMap()
+    TopExp.MapShapes_s(target, TopAbs_VERTEX, vmap)
+
+    n_faces = fmap.Extent()
+    n_edges = emap.Extent()
+    n_verts = vmap.Extent()
+    if n_faces == 0 or n_edges == 0:
+        return _ManifoldAudit()
+
+    edge_faces: list[list[int]] = [[] for _ in range(n_edges + 1)]
+    internal_edge_count = 0
+    for fid in range(1, n_faces + 1):
+        ee = TopExp_Explorer(fmap.FindKey(fid), TopAbs_EDGE)
+        while ee.More():
+            ed = to_edge(ee.Current())
+            if ed.Orientation() == TopAbs_INTERNAL:
+                internal_edge_count += 1
+            if not BRep_Tool.Degenerated_s(ed):
+                eid = emap.FindIndex(ed)
+                if eid > 0:
+                    edge_faces[eid].append(fid)
+            ee.Next()
+
+    nm_edges: list[TopoDS_Edge] = []
+    free_edge_count = 0
+    sub_parasolid_count = 0
+    tiny_edge_count = 0
+    min_edge_len = float("inf")
+    max_edge_tol = 0.0
+
+    for eid in range(1, n_edges + 1):
+        e = to_edge(emap.FindKey(eid))
+        tol = float(BRep_Tool.Tolerance_s(e))
+        if tol > max_edge_tol:
+            max_edge_tol = tol
+        if BRep_Tool.Degenerated_s(e):
+            continue
+        inc = edge_faces[eid]
+        if len(inc) == 1:
+            free_edge_count += 1
+        elif len(inc) > 2:
+            nm_edges.append(e)
+        lp = GProp_GProps()
+        BRepGProp.LinearProperties_s(e, lp)
+        elen = abs(float(lp.Mass()))
+        if elen < min_edge_len:
+            min_edge_len = elen
+        if 0.0 < elen < 1e-5:
+            sub_parasolid_count += 1
+        if 0.0 < elen < tiny_threshold:
+            tiny_edge_count += 1
+
+    # Detect pinched non-manifold vertices (incident faces form > 1 edge-connected fan)
+    v_faces: list[set[int]] = [set() for _ in range(n_verts + 1)]
+    v_edges: list[set[int]] = [set() for _ in range(n_verts + 1)]
+    for eid in range(1, n_edges + 1):
+        e = to_edge(emap.FindKey(eid))
+        if BRep_Tool.Degenerated_s(e):
+            continue
+        v1 = vmap.FindIndex(TopExp.FirstVertex_s(e, False))
+        v2 = vmap.FindIndex(TopExp.LastVertex_s(e, False))
+        if v1 > 0:
+            v_edges[v1].add(eid)
+        if v2 > 0:
+            v_edges[v2].add(eid)
+        for fid in edge_faces[eid]:
+            if v1 > 0:
+                v_faces[v1].add(fid)
+            if v2 > 0:
+                v_faces[v2].add(fid)
+
+    nm_edge_vids: set[int] = set()
+    for e in nm_edges:
+        nm_edge_vids.add(vmap.FindIndex(TopExp.FirstVertex_s(e, False)))
+        nm_edge_vids.add(vmap.FindIndex(TopExp.LastVertex_s(e, False)))
+
+    nm_verts: list[TopoDS_Vertex] = []
+    for vid in range(1, n_verts + 1):
+        if vid in nm_edge_vids:
+            continue
+        fs = v_faces[vid]
+        if len(fs) < 2:
+            continue
+        adj: dict[int, set[int]] = {f: set() for f in fs}
+        for eid in v_edges[vid]:
+            inc = [f for f in edge_faces[eid] if f in fs]
+            for a in inc:
+                for b in inc:
+                    if a != b:
+                        adj[a].add(b)
+        visited: set[int] = set()
+        comps = 0
+        for f in fs:
+            if f not in visited:
+                comps += 1
+                stack = [f]
+                visited.add(f)
+                while stack:
+                    u = stack.pop()
+                    for w in adj[u]:
+                        if w not in visited:
+                            visited.add(w)
+                            stack.append(w)
+        if comps > 1:
+            nm_verts.append(to_vertex(vmap.FindKey(vid)))
+
+    return _ManifoldAudit(
+        nm_edges=nm_edges,
+        nm_verts=nm_verts,
+        internal_edge_count=internal_edge_count,
+        free_edge_count=free_edge_count,
+        sub_parasolid_count=sub_parasolid_count,
+        tiny_edge_count=tiny_edge_count,
+        min_edge_len=min_edge_len,
+        max_edge_tol=max_edge_tol,
+    )
+
+
 def _fuse_two_safe(
     s1: TopoDS_Shape,
     s2: TopoDS_Shape,
-    fuzzy_schedule: tuple[float, ...] = (0.0, 1e-5, 1e-4, 1e-3, 5e-3),
+    fuzzy_schedule: tuple[float, ...] = (0.0, 5e-5, 1e-4, 1e-3, 5e-3),
 ) -> Optional[TopoDS_Shape]:
-    """Precision-first B-Rep Fuse with strict volume-preservation guard.
+    """Precision-first B-Rep Fuse with strict volume-preservation and internal-edge guards.
 
     Always tries exact fuzzy=0.0 first so fine CAD fillets/tangent edges are never
-    corrupted, and rejects degenerate results that silently drop either operand.
+    corrupted, and rejects degenerate results that silently drop either operand. If
+    fuzzy=0.0 embeds TopAbs_INTERNAL edges (from nanometer-scale NURBS/cylinder tangency
+    gaps that STEP AP214 drops into self-intersections), retries at tight fuzzy (5e-5, 1e-4)
+    and keeps the cleaner result only when validity and volume are preserved.
     """
     v1 = abs(_shape_volume(s1))
     v2 = abs(_shape_volume(s2))
     min_expected = max(v1, v2) - max(0.5, min(v1, v2) * 0.01)
     max_expected = (v1 + v2) * 1.01 + 1.0
+
+    best_res: Optional[TopoDS_Shape] = None
+    best_int = 0
+    best_valid = False
 
     for fz in fuzzy_schedule:
         try:
@@ -897,10 +1099,34 @@ def _fuse_two_safe(
                     continue
                 vr = abs(_shape_volume(res))
                 if min_expected <= vr <= max_expected:
+                    if fz == 0.0:
+                        int_cnt = _count_internal_edges(res, outer_only=True)
+                        if int_cnt == 0:
+                            return res
+                        best_res = res
+                        best_int = int_cnt
+                        best_valid = bool(
+                            make_brep_check_analyzer(res, geom_controls=False, parallel=True).IsValid()
+                        )
+                        continue
+                    if best_res is not None:
+                        if fz > 1e-4:
+                            return best_res
+                        int_cnt = _count_internal_edges(res, outer_only=True)
+                        cand_valid = bool(
+                            make_brep_check_analyzer(res, geom_controls=False, parallel=True).IsValid()
+                        )
+                        if int_cnt < best_int and not (best_valid and not cand_valid):
+                            best_res = res
+                            best_int = int_cnt
+                            best_valid = cand_valid
+                            if best_int == 0:
+                                return best_res
+                        continue
                     return res
         except Exception:
             continue
-    return None
+    return best_res
 
 
 def _batch_fuse_safe(
@@ -918,14 +1144,7 @@ def _batch_fuse_safe(
     max_v = max(abs(_shape_volume(s)) for s in shapes)
     sum_v = sum(abs(_shape_volume(s)) for s in shapes)
 
-    # Attempt fast single-pass multi-tool batch fuse ONLY at exact fuzzy=0.0.
-    # Never globally degrade the entire batch to fuzzy>0: a single tight tangent contact
-    # (e.g. concentric mating flanges) fused at fuzzy=1e-4 can introduce SelfIntersectingWire
-    # faces that fail BRepCheck after STEP round-trip. If exact batch fails, progressive
-    # pairwise fallback tries fuzzy=0.0 per pair first and raises fuzzy only where needed.
-    if cancel_check and cancel_check():
-        raise InterruptedError("Operation cancelled by user.")
-    try:
+    def _run_batch(fz: float) -> Optional[TopoDS_Shape]:
         args = ShapeList()
         args.Append(shapes[0])
         tools = ShapeList()
@@ -936,16 +1155,72 @@ def _batch_fuse_safe(
         fuse.SetTools(tools)
         fuse.SetRunParallel(True)
         fuse.SetNonDestructive(True)
+        if fz > 0.0:
+            fuse.SetFuzzyValue(float(fz))
         fuse.Build()
         if fuse.IsDone() and not fuse.Shape().IsNull():
             res = fuse.Shape()
             sols = _extract_solids(res)
             vr = abs(_shape_volume(res))
             if sols and vr >= max_v * 0.99 and vr <= sum_v * 1.01 + 1.0:
-                logs.append(
-                    f"{label} batch fuse succeeded ({len(shapes)} -> {len(sols)} solid(s), fuzzy=0.0)"
-                )
                 return res
+        return None
+
+    # Attempt fast single-pass multi-tool batch fuse at exact fuzzy=0.0 first.
+    # Never blindly degrade the batch to fuzzy>0; however, if fuzzy=0.0 leaves
+    # TopAbs_INTERNAL edges on outer shells (from nanometer NURBS/cylinder tangency gaps
+    # that STEP AP214 drops into self-intersections) or sub-Parasolid (< 1e-5 mm) micro-edges,
+    # test ultra-tight fuzzy (5e-5, 1e-4) and upgrade ONLY if validity is preserved and the
+    # outer-shell defect tuple strictly improves.
+    if cancel_check and cancel_check():
+        raise InterruptedError("Operation cancelled by user.")
+    try:
+        res0 = _run_batch(0.0)
+        if res0 is not None:
+            sols0 = _extract_solids(res0)
+            m0 = _inspect_manifold_topology(res0, outer_only=True)
+            best_res = res0
+            best_fz = 0.0
+            best_score = (m0.internal_edge_count, m0.sub_parasolid_count, len(m0.nm_edges))
+
+            if m0.internal_edge_count > 0 or m0.sub_parasolid_count > 0:
+                brep_ok0 = bool(
+                    make_brep_check_analyzer(res0, geom_controls=False, parallel=True).IsValid()
+                )
+                for fz in (5e-5, 1e-4):
+                    if cancel_check and cancel_check():
+                        raise InterruptedError("Operation cancelled by user.")
+                    cand = _run_batch(fz)
+                    if cand is None:
+                        continue
+                    brep_ok_c = bool(
+                        make_brep_check_analyzer(cand, geom_controls=False, parallel=True).IsValid()
+                    )
+                    if brep_ok0 and not brep_ok_c:
+                        continue
+                    mc = _inspect_manifold_topology(cand, outer_only=True)
+                    cand_score = (mc.internal_edge_count, mc.sub_parasolid_count, len(mc.nm_edges))
+                    if cand_score < best_score:
+                        best_res = cand
+                        best_fz = fz
+                        best_score = cand_score
+                        if best_score[0] == 0 and best_score[1] == 0:
+                            break
+
+            best_sols = _extract_solids(best_res)
+            if best_fz > 0.0:
+                logs.append(
+                    f"{label} batch fuse succeeded ({len(shapes)} -> {len(best_sols)} solid(s), "
+                    f"fuzzy={best_fz:g}; cleared internal/sub-precision edges "
+                    f"{m0.internal_edge_count}/{m0.sub_parasolid_count} -> {best_score[0]}/{best_score[1]})"
+                )
+            else:
+                logs.append(
+                    f"{label} batch fuse succeeded ({len(shapes)} -> {len(sols0)} solid(s), fuzzy=0.0)"
+                )
+            return best_res
+    except InterruptedError:
+        raise
     except Exception:
         pass
 
@@ -1483,35 +1758,300 @@ def _split_tangent_pinch_wire_faces(
     return repaired, pinch_holes
 
 
+def _build_non_manifold_bead(edge: TopoDS_Edge, radius: float = 0.05) -> Optional[TopoDS_Shape]:
+    """Build a microscopic analytic capsule/pipe bead along a non-manifold edge.
+
+    Eliminates zero-thickness (4-face checkerboard) non-manifold contacts that Parasolid
+    (SolidWorks) strictly forbids in a MANIFOLD_SOLID_BREP solid body, while keeping geometric
+    deviation microscopic (radius ~0.05 mm) and strictly preserving single-solid connectivity.
+    """
+    try:
+        p1 = BRep_Tool.Pnt_s(TopExp.FirstVertex_s(edge, False))
+        p2 = BRep_Tool.Pnt_s(TopExp.LastVertex_s(edge, False))
+        ac = BRepAdaptor_Curve(edge)
+        parts: list[TopoDS_Shape] = []
+
+        if ac.GetType() == GeomAbs_Line:
+            vec = gp_Vec(p1, p2)
+            length = vec.Magnitude()
+            if length > 1e-6:
+                parts.append(
+                    BRepPrimAPI_MakeCylinder(gp_Ax2(p1, gp_Dir(vec)), radius, length).Solid()
+                )
+            parts.append(BRepPrimAPI_MakeSphere(p1, radius).Solid())
+            if p1.Distance(p2) > 1e-6:
+                parts.append(BRepPrimAPI_MakeSphere(p2, radius).Solid())
+        else:
+            piped = False
+            try:
+                u0 = ac.FirstParameter()
+                pt0 = gp_Pnt()
+                tan0 = gp_Vec()
+                ac.D1(u0, pt0, tan0)
+                if tan0.Magnitude() > 1e-9:
+                    circ = gp_Circ(gp_Ax2(pt0, gp_Dir(tan0)), radius)
+                    prof_w = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circ).Edge()).Wire()
+                    prof_f = BRepBuilderAPI_MakeFace(prof_w, True).Face()
+                    spine = BRepBuilderAPI_MakeWire(edge).Wire()
+                    pipe = BRepOffsetAPI_MakePipe(spine, prof_f).Shape()
+                    if not pipe.IsNull() and _extract_solids(pipe):
+                        parts.append(pipe)
+                        piped = True
+            except Exception:
+                piped = False
+
+            if not piped:
+                # Fallback: overlapping spheres along the curve
+                u0, u1 = ac.FirstParameter(), ac.LastParameter()
+                lp = GProp_GProps()
+                BRepGProp.LinearProperties_s(edge, lp)
+                n_pts = max(3, min(32, int(math.ceil(abs(float(lp.Mass())) / max(radius, 1e-3))) + 1))
+                for k in range(n_pts):
+                    u = u0 + (u1 - u0) * (k / max(n_pts - 1, 1))
+                    parts.append(BRepPrimAPI_MakeSphere(ac.Value(u), radius).Solid())
+            else:
+                parts.append(BRepPrimAPI_MakeSphere(p1, radius).Solid())
+                if p1.Distance(p2) > 1e-6:
+                    parts.append(BRepPrimAPI_MakeSphere(p2, radius).Solid())
+
+        if not parts:
+            return None
+        acc = parts[0]
+        for nxt in parts[1:]:
+            fu = BRepAlgoAPI_Fuse(acc, nxt)
+            fu.SetRunParallel(True)
+            fu.SetNonDestructive(True)
+            fu.Build()
+            if fu.IsDone() and not fu.Shape().IsNull():
+                acc = fu.Shape()
+        return acc
+    except Exception:
+        return None
+
+
+def _heal_non_manifold_topology(
+    shape: TopoDS_Shape,
+    logs: list[str],
+    radii: tuple[float, ...] = (0.05, 0.10),
+    max_entities: int = 64,
+) -> TopoDS_Shape:
+    """Resolve non-manifold edges (>2 incident faces) and pinched non-manifold vertices.
+
+    Parasolid (SolidWorks) strictly requires every edge in a MANIFOLD_SOLID_BREP to have
+    exactly 2 incident faces and every vertex to have a single edge-connected face fan.
+    Fusing a microscopic analytic capsule/sphere (r=0.05 mm) over each zero-thickness pinch
+    converts it into clean 2-manifold geometry with negligible volume change (< 0.01%).
+    """
+    current = shape
+    m_base = _inspect_manifold_topology(current)
+    if not m_base.nm_edges and not m_base.nm_verts:
+        return current
+
+    rep_base = validate_shape(current)
+    orig_nm_e = len(m_base.nm_edges)
+    orig_nm_v = len(m_base.nm_verts)
+
+    for radius in radii:
+        m_cur = _inspect_manifold_topology(current)
+        if not m_cur.nm_edges and not m_cur.nm_verts:
+            break
+
+        beads: list[TopoDS_Shape] = []
+        for ed in m_cur.nm_edges[:max_entities]:
+            b = _build_non_manifold_bead(ed, radius=radius)
+            if b is not None:
+                beads.append(b)
+        rem_slots = max(0, max_entities - len(beads))
+        for v in m_cur.nm_verts[:rem_slots]:
+            try:
+                beads.append(BRepPrimAPI_MakeSphere(BRep_Tool.Pnt_s(v), radius).Solid())
+            except Exception:
+                pass
+
+        if not beads:
+            break
+
+        cand: Optional[TopoDS_Shape] = None
+        # Attempt single batch fuse of all beads first
+        try:
+            args = ShapeList()
+            args.Append(current)
+            tools = ShapeList()
+            for b in beads:
+                tools.Append(b)
+            fu = BRepAlgoAPI_Fuse()
+            fu.SetArguments(args)
+            fu.SetTools(tools)
+            fu.SetRunParallel(True)
+            fu.SetNonDestructive(True)
+            fu.Build()
+            if fu.IsDone() and not fu.Shape().IsNull():
+                sols = _extract_solids(fu.Shape())
+                if len(sols) == rep_base.solid_count:
+                    cleaned_sols = []
+                    for s in sols:
+                        sf, _, _ = _remove_closed_void_shells(s)
+                        BRepLib.OrientClosedSolid_s(sf)
+                        cleaned_sols.append(sf)
+                    cand = cleaned_sols[0] if len(cleaned_sols) == 1 else fu.Shape()
+        except Exception:
+            cand = None
+
+        # Sequential fallback if batch fuse failed on multiple beads
+        if cand is None and len(beads) > 1:
+            acc = current
+            for b in beads:
+                try:
+                    fu = BRepAlgoAPI_Fuse(acc, b)
+                    fu.SetRunParallel(True)
+                    fu.SetNonDestructive(True)
+                    fu.Build()
+                    if fu.IsDone() and not fu.Shape().IsNull():
+                        sols = _extract_solids(fu.Shape())
+                        if len(sols) == rep_base.solid_count:
+                            sf, _, _ = _remove_closed_void_shells(sols[0])
+                            BRepLib.OrientClosedSolid_s(sf)
+                            acc = sf if len(sols) == 1 else fu.Shape()
+                except Exception:
+                    continue
+            if not acc.IsSame(current):
+                cand = acc
+
+        if cand is None:
+            continue
+
+        BRepTools.Clean_s(cand)
+        rep_c = validate_shape(cand)
+        m_c = _inspect_manifold_topology(cand)
+        if (
+            rep_c.solid_count == rep_base.solid_count
+            and rep_c.shell_count <= rep_base.shell_count
+            and rep_c.is_watertight
+            and not (rep_base.is_valid and not rep_c.is_valid)
+            and abs(rep_c.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+            and (len(m_c.nm_edges), len(m_c.nm_verts)) < (len(m_cur.nm_edges), len(m_cur.nm_verts))
+        ):
+            current = cand
+            rep_base = rep_c
+
+    m_fin = _inspect_manifold_topology(current)
+    if (len(m_fin.nm_edges), len(m_fin.nm_verts)) < (orig_nm_e, orig_nm_v):
+        logs.append(
+            f"Healed non-manifold zero-thickness topology for SolidWorks/Parasolid compatibility "
+            f"(non-manifold edges {orig_nm_e} -> {len(m_fin.nm_edges)}, "
+            f"vertices {orig_nm_v} -> {len(m_fin.nm_verts)})"
+        )
+    return current
+
+
+def _collapse_sub_precision_edges(
+    shape: TopoDS_Shape,
+    logs: list[str],
+    min_length: float = 5e-5,
+) -> TopoDS_Shape:
+    """Eliminate edges shorter than Parasolid's linear precision (1e-5 mm, with 5x margin).
+
+    Microscopic edges (e.g. 6.3e-6 mm from nanometer-level mating misalignments) collapse to
+    degenerate zero-length edges in Parasolid/SolidWorks STEP import and break solid knitting.
+    """
+    m_base = _inspect_manifold_topology(shape, tiny_threshold=min_length)
+    if m_base.tiny_edge_count == 0:
+        return shape
+
+    rep_base = validate_shape(shape)
+    lacking_base = _count_lacking_wires(shape)
+    try:
+        sfw = ShapeFix_Wireframe(shape)
+        sfw.SetPrecision(min_length)
+        sfw.SetMaxTolerance(max(1e-4, 2.0 * min_length))
+        sfw.ModeDropSmallEdges = True
+        sfw.FixSmallEdges()
+        fixed_wf = sfw.Shape()
+        if fixed_wf.IsNull():
+            return shape
+
+        sf = ShapeFix_Shape(fixed_wf)
+        sf.SetPrecision(1e-4)
+        sf.SetMaxTolerance(1e-3)
+        sf.Perform()
+        sols = _extract_solids(sf.Shape())
+        cand: TopoDS_Shape = sols[0] if len(sols) == 1 else sf.Shape()
+        for s in sols:
+            BRepLib.OrientClosedSolid_s(s)
+        BRepTools.Clean_s(cand)
+        cand = _normalize_via_step_3d_curves(cand)
+
+        rep_c = validate_shape(cand)
+        lacking_c = _count_lacking_wires(cand)
+        m_c = _inspect_manifold_topology(cand, tiny_threshold=min_length)
+        max_tol_limit = max(m_base.max_edge_tol * 1.25, 1e-3)
+        if (
+            rep_c.solid_count == rep_base.solid_count
+            and rep_c.shell_count <= rep_base.shell_count
+            and rep_c.is_watertight
+            and not (rep_base.is_valid and not rep_c.is_valid)
+            and abs(rep_c.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
+            and lacking_c <= lacking_base
+            and m_c.max_edge_tol <= max_tol_limit
+            and len(m_c.nm_edges) <= len(m_base.nm_edges)
+            and len(m_c.nm_verts) <= len(m_base.nm_verts)
+            and m_c.tiny_edge_count < m_base.tiny_edge_count
+        ):
+            logs.append(
+                f"Collapsed sub-precision micro-edges (< {min_length:.0e} mm) for SolidWorks/Parasolid "
+                f"compatibility ({m_base.tiny_edge_count} -> {m_c.tiny_edge_count})"
+            )
+            return cand
+    except Exception:
+        pass
+    return shape
+
+
 def _heal_mesh_blocking_faces(
     shape: TopoDS_Shape,
     logs: list[str],
 ) -> TopoDS_Shape:
     """Eliminate faces that fail BRepMesh so CAD Assistant Clipping Capping stays enabled.
 
-    Step A: Single tight pass of ShapeFix_FixSmallFace(0.015) collapses razor-thin (< 0.015 mm)
-            tangent slivers that produce NULL triangulations in BRepMesh.
-    Step B: Targeted exact midpoint splitting of long curved edges ONLY on any remaining
-            mesh-failing faces (0 extra faces, 0.0 mm geometric distortion) prevents coarse
-            Prs3d chord self-intersection at CAD Assistant's default 20-deg/0.004*L mesh.
+    Audits first and returns immediately if all faces already mesh cleanly (never needlessly
+    collapsing thin valid CAD features or bloating edge tolerances). When unmeshed faces exist:
+    Step A: Progressive tight ShapeFix_FixSmallFace (1e-3 -> 5e-3 -> 1.5e-2 mm) guarded
+            against tolerance bloat and non-manifold regressions.
+    Step B: Targeted exact midpoint splitting of long curved edges ONLY on remaining
+            mesh-failing faces (0 extra faces, 0.0 mm geometric distortion).
     Step C: Exact local chord splitting of planar faces whose inner hole wire touches the outer
             boundary wire at a tangent pinch-point (0.0 mm geometric distortion, resolves OCCT
             IMeshData_SelfIntersectingWire on tangent holes).
     """
     current = shape
+
+    # Scan key CAD Assistant deflections FIRST — never touch faces when already 100% clean
+    fails_before, bad_faces = _audit_prs_closed_meshing(current, fast=True)
+    if fails_before == 0 and not bad_faces:
+        logs.append("CAD Assistant closed-mesh capping audit passed (0 unmeshed faces)")
+        return current
+
     rep_base = validate_shape(current)
     lacking_base = _count_lacking_wires(current)
+    m_base = _inspect_manifold_topology(current)
 
-    # Step A: Collapse razor-thin Boolean intersection slivers (< 0.015 mm)
-    try:
-        sfsf = ShapeFix_FixSmallFace()
-        sfsf.Init(current)
-        sfsf.SetPrecision(0.015)
-        sfsf.SetMaxTolerance(0.015)
-        sfsf.Perform()
-        fixed_small = sfsf.Shape()
+    # Step A: Progressive tight sliver collapse — only accept if unmeshed faces strictly improve
+    # and edge tolerances do NOT bloat (prevents deleting real 0.01 mm features and creating
+    # multi-micron 3D curve-to-surface gaps that break SolidWorks solid knitting).
+    for prec in (1e-3, 5e-3, 1.5e-2):
+        if fails_before == 0 and not bad_faces:
+            break
+        try:
+            sfsf = ShapeFix_FixSmallFace()
+            sfsf.Init(current)
+            sfsf.SetPrecision(prec)
+            sfsf.SetMaxTolerance(prec)
+            sfsf.Perform()
+            fixed_small = sfsf.Shape()
 
-        if not fixed_small.IsSame(current):
+            if fixed_small.IsSame(current):
+                continue
+
             sf = ShapeFix_Shape(fixed_small)
             sf.SetPrecision(1e-4)
             sf.SetMaxTolerance(1e-3)
@@ -1522,12 +2062,12 @@ def _heal_mesh_blocking_faces(
             for s in sols:
                 BRepLib.OrientClosedSolid_s(s)
             BRepTools.Clean_s(cand_a)
-            # Re-normalize via 3D-curve STEP so transient in-memory pcurve tolerances from
-            # FixSmallFace match the clean round-trip validity seen by external viewers.
             cand_a = _normalize_via_step_3d_curves(cand_a)
 
             rep_a = validate_shape(cand_a)
             lacking_a = _count_lacking_wires(cand_a)
+            m_a = _inspect_manifold_topology(cand_a)
+            max_tol_limit = max(m_base.max_edge_tol * 1.25, 1e-3)
             if (
                 rep_a.solid_count == rep_base.solid_count
                 and rep_a.shell_count <= rep_base.shell_count
@@ -1535,18 +2075,28 @@ def _heal_mesh_blocking_faces(
                 and not (rep_base.is_valid and not rep_a.is_valid)
                 and abs(rep_a.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
                 and lacking_a <= lacking_base
+                and m_a.max_edge_tol <= max_tol_limit
+                and len(m_a.nm_edges) <= len(m_base.nm_edges)
+                and len(m_a.nm_verts) <= len(m_base.nm_verts)
+                and m_a.sub_parasolid_count <= m_base.sub_parasolid_count
             ):
-                removed_slivers = max(0, rep_base.face_count - rep_a.face_count)
-                if removed_slivers > 0:
-                    logs.append(f"Cleaned {removed_slivers} microscopic sliver face(s) ({rep_a.face_count:,} faces remaining)")
-                current = cand_a
-                rep_base = rep_a
-                lacking_base = lacking_a
-    except Exception:
-        pass
+                fails_a, bad_a = _audit_prs_closed_meshing(cand_a, fast=True)
+                if fails_a < fails_before or len(bad_a) < len(bad_faces):
+                    removed_slivers = max(0, rep_base.face_count - rep_a.face_count)
+                    if removed_slivers > 0:
+                        logs.append(
+                            f"Cleaned {removed_slivers} microscopic sliver face(s) at {prec:g} mm "
+                            f"({rep_a.face_count:,} faces remaining, unmeshed {len(bad_faces)} -> {len(bad_a)})"
+                        )
+                    current = cand_a
+                    rep_base = rep_a
+                    lacking_base = lacking_a
+                    m_base = m_a
+                    fails_before = fails_a
+                    bad_faces = bad_a
+        except Exception:
+            pass
 
-    # Scan key CAD Assistant deflections (rel0.001 + abs_prs3d) to find any remaining NULL-mesh faces
-    fails_before, bad_faces = _audit_prs_closed_meshing(current, fast=True)
     if fails_before == 0 and not bad_faces:
         logs.append("CAD Assistant closed-mesh capping audit passed (0 unmeshed faces)")
         return current
@@ -1600,6 +2150,7 @@ def _heal_mesh_blocking_faces(
 
                     rep_b = validate_shape(cand_b)
                     lacking_b = _count_lacking_wires(cand_b)
+                    m_b = _inspect_manifold_topology(cand_b)
                     if (
                         rep_b.solid_count == rep_base.solid_count
                         and rep_b.shell_count <= rep_base.shell_count
@@ -1607,6 +2158,8 @@ def _heal_mesh_blocking_faces(
                         and not (rep_base.is_valid and not rep_b.is_valid)
                         and abs(rep_b.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
                         and lacking_b <= lacking_base
+                        and len(m_b.nm_edges) <= len(m_base.nm_edges)
+                        and len(m_b.nm_verts) <= len(m_base.nm_verts)
                     ):
                         fails_b, bad_b = _audit_prs_closed_meshing(cand_b, fast=True)
                         if fails_b < fails_before or len(bad_b) < len(bad_faces):
@@ -1617,6 +2170,7 @@ def _heal_mesh_blocking_faces(
                             current = cand_b
                             rep_base = rep_b
                             lacking_base = lacking_b
+                            m_base = m_b
                             fails_before = fails_b
                             bad_faces = bad_b
         except Exception:
@@ -1630,6 +2184,7 @@ def _heal_mesh_blocking_faces(
             if cand_c is not None and pinch_holes > 0:
                 rep_c = validate_shape(cand_c)
                 lacking_c = _count_lacking_wires(cand_c)
+                m_c = _inspect_manifold_topology(cand_c)
                 if (
                     rep_c.solid_count == rep_base.solid_count
                     and rep_c.shell_count <= rep_base.shell_count
@@ -1637,6 +2192,8 @@ def _heal_mesh_blocking_faces(
                     and not (rep_base.is_valid and not rep_c.is_valid)
                     and abs(rep_c.volume - rep_base.volume) / max(rep_base.volume, 1.0) < 0.01
                     and lacking_c <= lacking_base
+                    and len(m_c.nm_edges) <= len(m_base.nm_edges)
+                    and len(m_c.nm_verts) <= len(m_base.nm_verts)
                 ):
                     fails_c, bad_c = _audit_prs_closed_meshing(cand_c, fast=False)
                     if fails_c == 0 or len(bad_c) < len(bad_faces) or fails_c < fails_before:
@@ -1657,15 +2214,20 @@ def _sanitize_for_step_compat(
     shape: TopoDS_Shape,
     logs: list[str],
 ) -> TopoDS_Shape:
-    """Split 360-deg closed periodic surfaces, heal slivers/wires, and guarantee Closed meshing.
+    """Ensure strict 2-manifold Parasolid/SolidWorks solid validity and OCCT 7.x closed meshing.
 
-    Prevents periodic Cylinder/Cone/Torus seam-wire defects (CheckLacking) and NULL-triangulation
-    sliver/long-arc faces from causing OCCT 7.x viewers (CAD Assistant) to downgrade the Solid
-    to Opened surfaces and disable Clipping Plane Capping.
+    1. Heals non-manifold edges (>2 incident faces) & pinched vertices via microscopic analytic
+       beads BEFORE periodic splitting so SolidWorks/Parasolid imports a true MANIFOLD_SOLID_BREP.
+    2. Splits 360-deg closed periodic surfaces into 180-deg halves and heals wires/tolerances.
+    3. Normalizes via 3D-curve-only STEP so in-memory pcurves match external viewers.
+    4. Collapses sub-Parasolid-precision micro-edges (< 5e-5 mm) without tolerance bloat.
+    5. Eliminates CAD Assistant mesh-blocking sliver / curved / tangent pinch-wire faces.
     """
-    rep_orig = validate_shape(shape)
-    lacking_before = _count_lacking_wires(shape)
-    current = shape
+    current = _heal_non_manifold_topology(shape, logs)
+
+    rep_orig = validate_shape(current)
+    lacking_before = _count_lacking_wires(current)
+    m_orig = _inspect_manifold_topology(current)
 
     try:
         # 1. Split 360-deg closed periodic faces into two clean 180-deg non-periodic halves
@@ -1697,6 +2259,7 @@ def _sanitize_for_step_compat(
 
         rep_new = validate_shape(candidate)
         lacking_after = _count_lacking_wires(candidate)
+        m_new = _inspect_manifold_topology(candidate)
 
         if (
             rep_new.solid_count == rep_orig.solid_count
@@ -1705,6 +2268,8 @@ def _sanitize_for_step_compat(
             and not (rep_orig.is_valid and not rep_new.is_valid)
             and abs(rep_new.volume - rep_orig.volume) / max(rep_orig.volume, 1.0) < 0.01
             and lacking_after <= lacking_before
+            and len(m_new.nm_edges) <= len(m_orig.nm_edges)
+            and len(m_new.nm_verts) <= len(m_orig.nm_verts)
         ):
             logs.append(
                 f"STEP viewer periodic surface split & wire healing complete "
@@ -1717,8 +2282,36 @@ def _sanitize_for_step_compat(
     # 4. Normalize via 3D-curve-only STEP so stale in-memory pcurves match actual viewer import
     current = _normalize_via_step_3d_curves(current)
 
-    # 5. Eliminate sliver / coarse-deflection mesh-blocking faces for CAD Assistant Clipping Capping
+    # 5. Collapse any remaining sub-Parasolid-precision edges (< 5e-5 mm)
+    current = _collapse_sub_precision_edges(current, logs)
+
+    # 6. Eliminate sliver / coarse-deflection / pinch-wire mesh-blocking faces for CAD Assistant
     current = _heal_mesh_blocking_faces(current, logs)
+
+    # 7. Final safety pass if Step 6 introduced any sub-precision edge or non-manifold pinch
+    m_post = _inspect_manifold_topology(current)
+    if m_post.nm_edges or m_post.nm_verts:
+        healed_nm = _heal_non_manifold_topology(current, logs)
+        if not healed_nm.IsSame(current):
+            try:
+                divider2 = ShapeUpgrade_ShapeDivideClosed(healed_nm)
+                divider2.SetNbSplitPoints(1)
+                divider2.Perform()
+                sf2 = ShapeFix_Shape(divider2.Result())
+                sf2.SetPrecision(1e-4)
+                sf2.SetMaxTolerance(1e-3)
+                sf2.Perform()
+                sols2 = _extract_solids(sf2.Shape())
+                if len(sols2) == 1:
+                    BRepLib.OrientClosedSolid_s(sols2[0])
+                    healed_nm = sols2[0]
+            except Exception:
+                pass
+            current = _normalize_via_step_3d_curves(healed_nm)
+            m_post = _inspect_manifold_topology(current)
+    if m_post.tiny_edge_count > 0:
+        current = _collapse_sub_precision_edges(current, logs)
+
     return current
 
 

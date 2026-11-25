@@ -675,12 +675,42 @@ concatBSplines=False)` 는 동일 평면/동일 원통 면과 공유 엣지를 �
 
 ## 5. 크로스 커널 STEP 정규화
 
-최종 형상은 OCCT 8.x 뿐 아니라 다른 커널을 거쳐 왕복해도 살아남아야 합니다. OCCT 7.x
-뷰어(예: CAD Assistant)에서 "솔리드가 서피스로 보인다"는 불만의 대부분은 세 가지
-결함에서 옵니다. 주기 곡면 이음새 pcurve, 느슨한 `UNCERTAINTY`, 그리고 BRepMesh 가
-삼각화하지 못하는 면입니다. 각각을 명시적으로 처리합니다.
+최종 형상은 OCCT 8.x 뿐 아니라 **Parasolid(SolidWorks)** 와 **OCCT 7.x 뷰어(CAD Assistant)**
+모두에서 왕복(round-trip) 후에도 정상 솔리드로 열려야 합니다. "솔리드가 서피스로 깨짐"
+문제는 두 커널의 엄격성 기준에서 비롯됩니다.
 
-### 5.1 주기 곡면 분할과 와이어 힐링
+- **Parasolid / SolidWorks 매니폴드 솔리드 엄격성:** 비매니폴드 엣지(인접 면 $>2$, 예: 제로-두께
+  체커보드 접촉), 핀치 비매니폴드 정점(엣지 연결 면 팬 $>1$), STEP AP214 내보내기 시 탈락하여
+  면 자기교차를 유발하는 `TopAbs_INTERNAL` 탄젠트 슬릿 엣지, Parasolid 선형 정밀도
+  ($10^{-8}\text{ m} = 10^{-5}\text{ mm}$) 미만의 극소 엣지, 과도한 슬리버 제거로 발생한
+  수 마이크론급 커브-곡면 간극이 있으면 `MANIFOLD_SOLID_BREP` 를 솔리드로 결합하지 못하고
+  서피스 바디로 강등합니다.
+- **OCCT 7.x / CAD Assistant 메싱 엄격성:** 주기 곡면 이음새 pcurve 결함, 느슨한
+  `UNCERTAINTY`, 또는 `BRepMesh` 가 단 하나의 면이라도 삼각화하지 못하면 솔리드를
+  *Opened* 로 강등합니다.
+
+각 결함 유형은 엄격한 부피·유효성·공차 가드 아래에서 명시적으로 처리합니다.
+
+### 5.1 엄격한 2-매니폴드 힐링 및 Parasolid 엣지 정밀도 보장
+
+1. **Boolean 내부 슬릿·초미세 엣지 가드 (`_batch_fuse_safe`, `_fuse_two_safe`).**
+   정밀 $\text{fuzzy}=0$ 결합 성공 직후 $O(N)$ 외곽 쉘 감사를 통해 `TopAbs_INTERNAL` 엣지와
+   Parasolid 정밀도 미만 엣지($L < 10^{-5}\text{ mm}$)를 점검합니다. 나노미터급 NURBS-원통
+   접선 중첩이나 조립 미세 오차로 이러한 결함이 발생한 경우에만 초정밀
+   $\text{fuzzy} \in \{5\times 10^{-5},\, 10^{-4}\}\text{ mm}$ 로 재시도하며, `BRepCheck`
+   유효성이 유지되고 결함 지표가 엄격히 감소할 때만 채택합니다.
+2. **비매니폴드 엣지·정점 힐링 (`_heal_non_manifold_topology`).**
+   주기 곡면 분할 직전, 인접 면이 3개 이상인 비매니폴드 엣지와 인접 면 팬이 2개 이상으로
+   분리된 핀치 정점을 $O(N)$ 탐색으로 검출합니다. 각 제로-두께 접촉에 미세 해석적
+   캡슐/파이프 또는 구($r = 0.05\text{ mm}$, 잔여 시 1회 $0.10\text{ mm}$)를 결합한 뒤
+   내부 공동 제거 및 외향 정렬을 수행해 부피 변화 없이($<0.01\%$) 엄격한 2-매니폴드 경계를
+   복원합니다.
+3. **정밀도 미만 엣지 정리 (`_collapse_sub_precision_edges`).**
+   3D 커브 STEP 정규화 후에도 $5\times 10^{-5}\text{ mm}$(Parasolid $10^{-5}\text{ mm}$ 의
+   5배 여유) 미만의 비퇴화 엣지가 남아 있으면 `ShapeFix_Wireframe.FixSmallEdges()`
+   (`precision=5e-5`, `maxTolerance=1e-4`)로 엣지 공차 팽창 없이 정리합니다.
+
+### 5.2 주기 곡면 분할과 와이어 힐링
 
 완전 회전 원통/원추/토러스는 주기 매개변수 $u\in[0,2\pi]$ 를 가지며, 이음새는
 퇴화된 pcurve 로 표현됩니다. 리더가 3D 커브에서 pcurve 를 재구성하면 이음새
@@ -697,24 +727,25 @@ concatBSplines=False)` 는 동일 평면/동일 원통 면과 공유 엣지를 �
 부피 변화가 1 % 이내이며, `CheckLacking` 와이어 결함 수가 증가하지 않을 때만
 채택됩니다.
 
-### 5.2 pcurve 없는 왕복과 정밀도 클램핑
+### 5.3 pcurve 없는 왕복과 정밀도 클램핑
 
 라이터는 OCCT 가 **3D 커브만** 내보내도록 설정합니다.
 
 ```
 write.surfacecurve.mode = 0     # pcurve 생략; 리더가 3D 형상에서 재계산
 write.precision.mode    = 2     # 사용자 지정 불확실도
-write.precision.val     = clamp(avg_tolerance, 1e-5, 1e-3)
+write.precision.val     = clamp(avg_tolerance, 1e-5, min(1e-3, 0.5 * min_edge_len))
 ```
 
-여기서 `avg_tolerance` 는 `ShapeAnalysis_ShapeTolerance` 에서 옵니다. 클램프가
+여기서 `avg_tolerance` 는 `ShapeAnalysis_ShapeTolerance` 에서 오며, `min_edge_len` 은
+가장 짧은 비퇴화 엣지 길이입니다($0.5\,L_{\min}\ge 10^{-5}$ 일 때 상한 적용). 클램프가
 중요합니다. 유도값이 $10^{-2}$ mm 이면 리더가 미세 엣지를 붕괴시키고 모델을 성기게
-테셀레이션하며, $10^{-5}$ mm 를 강제하면 불리언 결과의 기하학적 유효성보다 작아질 수
-있습니다. 그런 다음 임시 STEP 에서 다시 읽어(`_normalize_via_step_3d_curves`)
+테셀레이션하며, $0.5\,L_{\min}$ 이하로 제한하면 Parasolid/SolidWorks 가 유효한 짧은 엣지를
+붕괴시키는 현상을 방지합니다. 그런 다음 임시 STEP 에서 다시 읽어(`_normalize_via_step_3d_curves`)
 메모리 상의 형상이 **외부 뷰어가 보게 될 pcurve 와 공차를 정확히** 갖도록 합니다.
 즉 오래된 메모리 pcurve 가 이식성 문제를 가릴 수 없습니다.
 
-### 5.3 메쉬를 막는 슬리버, 내접 핀치 와이어와 클리핑 캡핑
+### 5.4 메쉬를 막는 슬리버, 내접 핀치 와이어와 클리핑 캡핑
 
 OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이라도** NULL 삼각화를 내면
 솔리드를 *Opened* 로 분류합니다. 감사(audit)는 CAD Assistant 의 프로파일을
@@ -726,11 +757,15 @@ OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이�
 (\text{absolute},\ \text{angular}) \in \{(0.001,\ldots,0.004)\,L_{\max},\ 0.35\}.
 ```
 
-어떤 면이 실패하면 동일한 유효성·워터타이트·공동·부피 가드 아래에서 세 가지 단계적 복구를
-순서대로 시도합니다.
+감사를 **먼저** 수행하며 실패한 면이 0개이면 즉시 반환해 실제 미세 형상(예: 0.01 mm
+커넥터 단차)을 붕괴시키거나 공차를 팽창시키지 않습니다. 실패한 면이 있을 때만 유효성·
+워터타이트·공동·부피·비매니폴드·최대 엣지 공차 가드 아래에서 세 가지 단계적 복구를 순서대로
+시도합니다.
 
-1. **미세 슬리버 제거 (Step A).** 정밀도 0.015 mm 의 `ShapeFix_FixSmallFace` 가 불리언
-   교차에서 생긴 삼각화 불가능한 극박 탄젠트 슬리버를 붕괴시킵니다.
+1. **점진적 정밀 슬리버 제거 (Step A).** `ShapeFix_FixSmallFace` 를
+   $(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ 순으로 보수적으로 적용하며,
+   미메싱 면이 실제로 줄어들고 최대 엣지 공차가 $\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$
+   이내로 유지될 때만 채택합니다.
 2. **정밀 곡선 엣지 중점 분할 (Step B).** 실패한 면에 대해서만 긴 곡선 엣지를 **정확히
    중점 분할** (`_split_edge_exact_subedges`)합니다. 서브 엣지는 같은 3D 커브 위에
    있으므로 기하 오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가
@@ -769,7 +804,7 @@ OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이�
    부피와 표면적을 100 % 동일하게 유지하면서도 CAD Assistant 에서 모든 면이 정상 Closed
    Solid 및 단면 캡핑으로 렌더링됩니다.
 
-### 5.4 최종 검증
+### 5.5 최종 검증
 
 `validate_shape` 는 정밀 B-Rep 지표를 리포트합니다.
 
