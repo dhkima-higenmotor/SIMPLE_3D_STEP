@@ -942,7 +942,122 @@ T_{\text{worker}} = \max\!\left(1,\ \lfloor C / W \rfloor\right).
 
 ---
 
-## 7. 복잡도와 파라미터 가이드
+## 7. PCB Mode: Altium STEP + IDF 부품별 단순화
+
+기구 어셈블리(3~5장)는 숨겨진 내부 부품을 제거하고 전체를 1개의 솔리드로 결합합니다. 반면
+전자회로 PCB 어셈블리는 **실장된 개별 부품을 유지하되 각 부품을 1개의 Watertight 해석적
+솔리드로 단순화하고, 원래 본체 색상과 부품 계층 명칭을 보존하며, Altium IDF(`.bdf`/`.ldf`)로
+누락 부품만 보완**하는 별도 파이프라인을 사용합니다.
+
+### 7.1 2단계 XCAF 계층 추출 및 프로토타입 캐싱/인스턴싱
+
+Altium Designer에서 내보낸 STEP 파일은 최상위 `PCB` 어셈블리 아래에 다음과 같은 2단계
+XCAF 구조를 가집니다.
+
+```text
+PCB (최상위 어셈블리)
+  ├── occurrence_ref ('856') ──▶ 부품번호 어셈블리 ('U1')
+  │     └── model_ref ('855') ──▶ 최하단 부품명칭 ('User Library-CSG324')
+  └── occurrence_ref ('646') ──▶ 부품번호 어셈블리 ('J2')
+        └── model_ref ('645') ──▶ ... ──▶ 최하단 부품명칭 ('TF31-20S-0_5SH_PRT-215090.PRT')
+```
+
+`core/step_io.py::load_pcb_assembly`는 Altium 내부 숫자 ID나 번역기 기본 문자열을 걸러내고
+참조 라벨의 **부품번호(`ref_des`)**와 최하위 모델 라벨의 **최하단 부품명칭(`leaf_name`)**을
+함께 추출합니다. 동일한 SMD 풋프린트(예: 170개의 `C2012` 커패시터)는 하나의 프로토타입
+라벨을 공유하므로, 강체 변환(`TopLoc_Location`)에 불변인 부피·표면적·면 수·면적 가중 RGB
+색상을 프로토타입 라벨(`TDF_Tool.Entry_s`) 단위로 캐싱하여 로딩 시간을 크게 단축합니다.
+
+저장 시(`save_colored_assembly_to_step`)에는 동일 규격의 정규화 박스($w \ge d$가 되도록
+$\pm 90^\circ$ 정규화) 및 수직 실린더를 `leaf_name` 이름의 단일 XCAF 프로토타입으로 공유하고,
+각 인스턴스를 Altium과 동일한 2단계 `RefDes → LeafName` 어셈블리 노드로 배치합니다. 이를
+통해 두 단계 명칭과 색상(`AP214`/`AP242`)을 모두 유지하면서 파일 크기를 **약 60~90%** 줄입니다.
+
+### 7.2 PCB 기판 정리 및 선택적 비아 홀 디피처링
+
+기판 솔리드는 넓은 XY 투영 면적($A_{xy} \ge 0.35 A_{\max}$), 얇은 평판 두께
+($0.25 \le \Delta z \le 6.5\text{ mm}$, 종횡비 $\ge 5$) 및 이름 휴리스틱(`PCB`, `BOARD`,
+`FR4`, `SUBSTRATE`)으로 자동 판별합니다. 기판 외곽선과 마운팅 홀은 박스화하지 않고 원본을
+유지하며, `pcb_min_board_hole_mm` ($d_{\min} > 0$, 기본 $0.8\text{ mm}$) 설정 시 내부 수직
+원통면($|\mathbf{a}\cdot\hat{\mathbf{z}}| > 0.95$, 직경 $2r < d_{\min}$)만 일괄
+`BRepAlgoAPI_Defeaturing`으로 메우고(`solid_count == 1` 및 $V' \ge 0.98 V$ 검증)
+`ShapeUpgrade_UnifySameDomain`으로 동일 평면을 통합합니다.
+
+### 7.3 전체 정점 기반 2D Rotating Calipers OBB
+
+Altium STEP은 $45^\circ$·$115^\circ$ 등으로 회전 실장된 부품의 회전을 XCAF 인스턴스 변환이
+아닌 리프 형상 좌표에 직접 구워 넣는 경우가 많습니다. BGA(324볼)나 다핀 커넥터처럼 정점이
+많은 부품에서도 일부 정점 절단으로 인한 왜곡이 발생하지 않도록
+`core/pcb_simplifier.py::_collect_shape_points`는 `TopExp.MapShapes_s(..., TopAbs_VERTEX)`로
+**모든 고유 정점**을 수집(정점이 적은 순수 원통은 곡선 엣지 샘플링 병행)하고, XY 볼록 껍질
+(Convex Hull)의 모든 변 방향 $\theta \in [0, \pi/2)$에 대해 최소 면적 직사각형을 구합니다.
+
+```math
+\theta^* = \arg\min_{\theta}\;
+\bigl(\max_i u_i(\theta) - \min_i u_i(\theta)\bigr)\,
+\bigl(\max_i v_i(\theta) - \min_i v_i(\theta)\bigr),
+```
+
+여기서 $(u_i, v_i) = (x_i\cos\theta + y_i\sin\theta,\; -x_i\sin\theta + y_i\cos\theta)$입니다.
+$0^\circ/90^\circ$에서 $1^\circ$ 이내(또는 축정렬 면적의 $1.5\%$ 이내)면 깔끔하게 축정렬로
+스냅하고, 임의 각도(예: $115.00^\circ$)는 오차 없이 그대로 보존합니다.
+
+### 7.4 부품 형상 분류 및 단일 Solid 결합
+
+기판을 제외한 각 실장 부품에 대해(소형 부품 제외 옵션 `pcb_exclude_small_part_mm > 0`이
+켜져 있고 OBB 최대 치수 $\max(w, d, h) \le \text{임계값}$이면 제외):
+
+1. **각인·양각 글자 및 로고 제거**: 본체 XY 내부의 상·하면 근처에 존재하는 초소형·초박형
+   서브 바디($V < 0.008 V_{\text{main}}$, 최소 치수 $< 0.25\text{ mm}$)를 사전 제거합니다.
+2. **원통형 부품(전해콘덴서·원통 캔·원형 인덕터)**: 지배적 원통축 $\hat{\mathbf{a}}$을
+   따르는 동축 `GeomAbs_Cylinder` 면적비 $A_{\text{cyl}}/(2\pi r h)$, 반경 경계
+   ($r_{\max} \le 1.28 r$), 부피비 $V/(\pi r^2 h) \in [0.55, 1.20]$을 만족하면 정확한
+   `BRepPrimAPI_MakeCylinder`(3면)로 치환합니다. 수직 원통 아래에 캔 직경보다 눈에 띄게
+   넓은 사각 베이스($\max(w_b, d_b) > 2.16 r$)가 있으면 사각 베이스 박스와 축 방향
+   $0.05\text{ mm}$ 중첩 후 1개 Solid로 병합합니다.
+3. **다중 바디 IC 칩 및 커넥터(본체 + 냉각판 + 리드/핀 군집)**: 주 본체 외부의 서브 바디를
+   주요 블록(냉각판·방열 탭·하우징  shroud, $V \ge 0.12 V_{\text{main}}$)과 리드/핀으로
+   분류합니다. 리드는 로컬 OBB 6개 면(`left`/`right`/`front`/`back`/`bottom`/`top`)별
+   뱅크로 묶고 넓은 빈 구간은 1D 갭 클러스터링으로 분할한 뒤, 본체 방향으로 $0.06\text{ mm}$
+   중첩된 단순 직육면체로 만들어 `BRepAlgoAPI_Fuse` + `ShapeUpgrade_UnifySameDomain`으로
+   1개의 Watertight Solid를 생성합니다(실패 시 fuzzy 재시도 및 단일 OBB 박스 폴백 보장).
+4. **소형 SMD 및 일반 부품**: $\max(w, d, h) \le \text{pcb\_small\_part\_box\_mm}$인 컴팩트
+   부품은 정규화 OBB 단일 직육면체(6면)로 바로 단순화합니다.
+
+### 7.5 대표 본체 색상 추출 및 최소 명도 자동 보정
+
+가장 큰 부피의 본체 Solid 면들 중 극소 마킹 면(최대 면의 $0.5\%$ 미만)을 제외한 면적 가중
+최빈 RGB를 대표 색상으로 선택합니다. 검은색 IC·커넥터 하우징(`(0, 0, 0)` 등)은 CAD 뷰어에서
+음영과 모서리가 보이지 않아 식별이 불편하므로, `_ensure_min_brightness`가 ITU-R BT.709 휘도
+하한 $L_{\min} = \text{pcb\_min\_color\_brightness}$(기본 $0.12$, OCCT 선형 RGB 기준)를
+적용합니다.
+
+```math
+L = 0.2126\,R + 0.7152\,G + 0.0722\,B.
+```
+
+$L < L_{\min}$인 경우 무채색 검정은 읽기 편한 다크 차콜 $(L_{\min}, L_{\min}, L_{\min})$로
+보정하고, 유채색 어두운 색상은 색조를 유지한 채 $L_{\min}/L$ 배율로 밝기를 끌어올립니다
+(채널이 $1.0$을 초과하는 고채도 색상은 클리핑 없이 부드럽게 선형 보간).
+
+### 7.6 Altium IDF (`.bdf`/`.ldf`) 정합 및 엄격한 비(非)대체 보완
+
+`core/idf_parser.py`는 IDF 2.0/3.0 보드(`.bdf`/`.brd`/`.emn`) 및 라이브러리(`.ldf`/`.pro`/`.emp`)
+파일(`MM` / `THOU` $\times 0.0254$, 따옴표 문자열, 원호 및 $360^\circ$ 원형 풋프린트)을
+파싱합니다. STEP 기판과 IDF 외곽선을 $90^\circ$ 단위 후보 회전으로 정렬한 뒤, 매칭된 STEP
+부품 중심점의 중앙값 잔차(median residual)로 `(dx, dy)`를 정밀 보정($0.05\text{ mm}$ 미만은
+정확한 `0.0` 스냅)합니다. `BOTTOM` 면 부품은 회전 전 $X$ 미러링을 적용해 기판 하단
+`board_z_bottom - z_offset` 아래로 돌출시킵니다.
+
+이미 STEP에 존재하는 부품의 오염·대체를 원천 차단하기 위해, **대소문자 무시 `RefDes` 정확
+일치**를 1순위로 대조하고 동일 면 XY 겹침($\text{IoU}_{\min} \ge 0.30$)을 보조 확인합니다.
+STEP에 이미 존재하는 부품(소형 제외 옵션으로 사용자가 의도적으로 제외한 부품 포함)은 절대
+덮어쓰거나 재추가하지 않으며, 높이 0인 `HOLE`/`FIDUCIAL` 항목도 제외하고 실제로 STEP에서
+누락된 부품만 회전 직육면체 Solid로 보완합니다.
+
+---
+
+## 8. 복잡도와 파라미터 가이드
 
 $P$ = 부품 수, $F$ = 전체 면 수, $T$ = 전체 삼각형 수, $n_v$ = 시점 수,
 $m$ = 격자 해상도, $B\le P$ = 경계 부품 수, $n_s$ = 부품당 샘플 수,
@@ -984,7 +1099,21 @@ $K$ = 샘플당 광선 수, $R_{\text{grid}}$ = 코어 격자 해상도라 하�
 | `unify_same_domain` | on | 면 압축, 가드 적용 |
 | `keep_largest_only` | on | 브리지 불가 아일랜드를 컴파운드 대신 폐기 |
 | `step_schema` | AP214 | AP214 / AP242 / AP203 |
-| `batch_workers` / CLI `-j` | 0 (Auto) | Batch Mode / 다중 파일 CLI 동시 CAD 워커 수 (`0` = 자동 최대 6, 워커별 스레드 예산 분할) |
+| `batch_workers` / CLI `-j` | 0 (Auto) | Batch / PCB Mode / 다중 파일 CLI 동시 CAD 워커 수 (`0` = 자동 최대 6, 워커별 스레드 예산 분할) |
+
+**PCB Mode 파라미터 선택.**
+
+| 파라미터 | 기본값 | 효과 |
+| :--- | :---: | :--- |
+| `pcb_min_board_hole_mm` | 0.8 mm | 이 직경 미만의 기판 수직 비아 홀 자동 삭제 (`0` = 모든 홀 유지) |
+| `pcb_exclude_small_part_mm` | 0.0 mm | OBB 최대 치수가 이 값 이하인 소형 부품 제외 (`0` = 모두 유지) |
+| `pcb_min_color_brightness` | 0.12 | 어두운/검은 부품의 선형 RGB 최소 휘도 하한 (`0` = 비활성) |
+| `pcb_detect_cylinders` / `pcb_cylinder_circularity_min` | on / 0.80 | 전해콘덴서·원통 캔 등을 정확한 실린더로 단순화 |
+| `pcb_simplify_leads` | on | IC·커넥터 리드/핀 배열을 측면 뱅크 직육면체로 묶어 본체·냉각판과 결합 |
+| `pcb_remove_text_features` | on | 본체 표면의 미세 각인/양각 글자·로고 바디 제거 |
+| `pcb_small_part_box_mm` | 4.0 mm | 컴팩트 SMD 부품을 단일 정규화 OBB 직육면체로 직결 단순화 |
+| `pcb_preserve_colors` | on | `AP214`/`AP242` XCAF STEP에 부품 대표 RGB 색상 보존 |
+| `pcb_use_idf_supplement` | on | 동명 `.bdf`/`.ldf` IDF 대조 후 STEP 누락 부품만 직육면체 보완 |
 
 안전 여백과 격자 피치는 결합되어 있습니다. 코드는
 $\text{inset} \ge 1.6h$ 를 강제하므로 격자가 거칠수록 보호 셸이 자동으로 넓어집니다.
@@ -993,7 +1122,7 @@ $\text{inset} \ge 1.6h$ 를 강제하므로 격자가 거칠수록 보호 셸이
 
 ---
 
-## 8. 가정과 한계
+## 9. 가정과 한계
 
 - **워터타이트 B-Rep 입력.** 입력 솔리드는 닫혀 있고 매니폴드라고 가정합니다. 열린
   껍질은 솔리드로 승격할 수 있지만 둘러싸인 부피가 정의되지 않으므로, 결과는 조용히
@@ -1019,7 +1148,7 @@ $\text{inset} \ge 1.6h$ 를 강제하므로 격자가 거칠수록 보호 셸이
 
 ---
 
-## 9. 참고문헌
+## 10. 참고문헌
 
 1. OpenCASCADE Technology — *Modeling Algorithms*, *Data Exchange*, `BRepGProp`,
    `BRepAlgoAPI`, `ShapeFix`, `ShapeUpgrade` 문서.

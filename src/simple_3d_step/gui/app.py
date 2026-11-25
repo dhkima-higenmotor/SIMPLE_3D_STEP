@@ -27,6 +27,7 @@ from simple_3d_step.gui.busy_banner import BusyBanner
 from simple_3d_step.gui.control_panel import ControlPanel
 from simple_3d_step.gui.log_panel import LogPanel
 from simple_3d_step.gui.part_tree import PartTreePanel
+from simple_3d_step.gui.pcb_panel import PcbPanel
 from simple_3d_step.gui.settings_dialog import SettingsDialog
 from simple_3d_step.gui.theme import (
     COLORS,
@@ -59,19 +60,11 @@ class Simple3DStepApp(tk.Tk):
         self._set_window_icon()
         self.title(BASE_TITLE)
 
-        # Compact, high-density default window size sized cleanly to fit toolbars without overlap
-        scr_w = self.winfo_screenwidth()
-        scr_h = self.winfo_screenheight()
-        win_w = min(800, max(780, scr_w - 100))
-        win_h = min(590, max(540, scr_h - 120))
-        self.geometry(f"{win_w}x{win_h}")
-        self.minsize(780, 540)
-
         self._config_path = get_default_config_path()
         bootstrapped_from = ensure_config_file(self._config_path)
         self._config: AppConfig = load_config(self._config_path)
 
-        self._start_mode = start_mode if start_mode in ("single", "batch") else "single"
+        self._start_mode = start_mode if start_mode in ("single", "batch", "pcb") else "single"
         self._initial_files: list[Path] = [Path(p) for p in (initial_files or [])]
 
         # Metadata-only assembly/result in GUI process; real OCCT shapes live in worker process
@@ -112,12 +105,16 @@ class Simple3DStepApp(tk.Tk):
             font_size=self._config.ui_font_size,
         )
         self._build_layout()
+        self._apply_optimal_window_geometry()
         self._bind_shortcuts()
         self._update_ui_state()
 
-        # Pre-fill the batch queue with any files passed on the command line
+        # Pre-fill the active multi-file queue with any files passed on the command line
         # (run_simple_3d_step.bat / .sh drag & drop or CLI args support several files at once)
-        self._batch_panel.queue_files(self._initial_files)
+        if self._start_mode == "pcb":
+            self._pcb_panel.queue_files(self._initial_files)
+        else:
+            self._batch_panel.queue_files(self._initial_files)
         self._select_mode(self._start_mode)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -134,6 +131,37 @@ class Simple3DStepApp(tk.Tk):
             f"External 3D viewer: {viewer_info} · UI Font: {active_font} {self._config.ui_font_size}pt"
         )
         self._log_panel.append_log("Starting background CAD worker process (freeze-free mode)...")
+
+    def _apply_optimal_window_geometry(self, expand_only: bool = False) -> None:
+        """Size the window cleanly to fit all 3 tabs and toolbars without clipping at any UI font size."""
+        self.update_idletasks()
+        scr_w = max(800, self.winfo_screenwidth())
+        scr_h = max(600, self.winfo_screenheight())
+        max_w = min(1140, max(820, scr_w - 80))
+        max_h = min(740, max(580, scr_h - 100))
+
+        req_w = max(
+            self.winfo_reqwidth(),
+            self._batch_panel.winfo_reqwidth(),
+            self._pcb_panel.winfo_reqwidth(),
+        )
+        req_h = max(
+            self.winfo_reqheight(),
+            self._batch_panel.winfo_reqheight(),
+            self._pcb_panel.winfo_reqheight(),
+        )
+
+        target_w = min(max_w, max(1020, req_w + 32))
+        target_h = min(max_h, max(680, req_h + 24))
+
+        if expand_only:
+            cur_w = self.winfo_width()
+            cur_h = self.winfo_height()
+            target_w = max(cur_w, target_w)
+            target_h = max(cur_h, target_h)
+
+        self.geometry(f"{target_w}x{target_h}")
+        self.minsize(min(900, target_w), min(580, target_h))
 
     def _set_window_icon(self) -> None:
         """Apply the packaged app icon across Windows (.ico) and Linux/macOS (.png)."""
@@ -172,26 +200,38 @@ class Simple3DStepApp(tk.Tk):
         self.bind_all("<F5>", lambda _e: self._on_shortcut_run())
         self.bind_all("<Escape>", lambda _e: self._on_shortcut_stop())
 
-    # --- Mode tabs (Single / Batch) ---
+    # --- Mode tabs (Single / Batch / PCB) ---
 
     def _current_mode(self) -> str:
-        """Return the active mode tab key: ``"single"`` or ``"batch"``."""
+        """Return the active mode tab key: ``"single"``, ``"batch"``, or ``"pcb"``."""
         try:
             current = self._notebook.select()
         except tk.TclError:
             return "single"
-        return "batch" if str(current) == str(self._batch_panel) else "single"
+        if str(current) == str(self._batch_panel):
+            return "batch"
+        if str(current) == str(self._pcb_panel):
+            return "pcb"
+        return "single"
 
     def _select_mode(self, mode: str) -> None:
-        """Switch to the Single or Batch mode tab."""
-        page = self._batch_panel if mode == "batch" else self._single_tab
+        """Switch to the Single, Batch, or PCB mode tab."""
+        if mode == "batch":
+            page = self._batch_panel
+        elif mode == "pcb":
+            page = self._pcb_panel
+        else:
+            page = self._single_tab
         self._notebook.select(page)
         self._on_mode_changed()
 
     def _on_mode_changed(self, _event: Optional[tk.Event] = None) -> None:
-        # Warm up the batch CAD worker as soon as the batch tab is opened
-        if self._current_mode() == "batch":
+        # Warm up the multi-file CAD worker lazily as soon as its tab is opened
+        mode = self._current_mode()
+        if mode == "batch":
             self._batch_panel.ensure_worker()
+        elif mode == "pcb":
+            self._pcb_panel.ensure_worker()
         self._sync_mode_tabs()
 
     def _sync_mode_tabs(self) -> None:
@@ -203,20 +243,32 @@ class Simple3DStepApp(tk.Tk):
             if batch.running
             else "  Batch Mode  "
         )
-        for idx, text in enumerate((single_text, batch_text)):
+        pcb = self._pcb_panel
+        pcb_text = (
+            f"  ● PCB Mode ({pcb.completed}/{pcb.total})  "
+            if pcb.running
+            else "  PCB Mode  "
+        )
+        for idx, text in enumerate((single_text, batch_text, pcb_text)):
             if self._notebook.tab(idx, "text") != text:
                 self._notebook.tab(idx, text=text)
 
         if self._busy:
             return
-        if batch.running and self._current_mode() == "batch":
+        mode = self._current_mode()
+        if batch.running and mode == "batch":
             self.title(f"[{batch.completed + 1}/{batch.total}] Batch processing — SIMPLE 3D STEP")
+        elif pcb.running and mode == "pcb":
+            self.title(f"[{pcb.completed + 1}/{pcb.total}] PCB processing — SIMPLE 3D STEP")
         else:
             self.title(BASE_TITLE)
 
     def _on_shortcut_open(self) -> None:
-        if self._current_mode() == "batch":
+        mode = self._current_mode()
+        if mode == "batch":
             self._batch_panel.add_files_dialog()
+        elif mode == "pcb":
+            self._pcb_panel.add_files_dialog()
         else:
             self._on_open_step()
 
@@ -225,12 +277,18 @@ class Simple3DStepApp(tk.Tk):
             self._on_save_result()
 
     def _on_shortcut_run(self) -> None:
-        if self._current_mode() == "batch":
+        mode = self._current_mode()
+        if mode == "batch":
             self._batch_panel.run()
+        elif mode == "pcb":
+            self._pcb_panel.run()
 
     def _on_shortcut_stop(self) -> None:
-        if self._current_mode() == "batch":
+        mode = self._current_mode()
+        if mode == "batch":
             self._batch_panel.stop()
+        elif mode == "pcb":
+            self._pcb_panel.stop()
 
     def _make_step_button(
         self,
@@ -298,15 +356,17 @@ class Simple3DStepApp(tk.Tk):
             self._apply_step_style(key, "idle")
 
     def _build_layout(self) -> None:
-        # Mode tabs: [Single Mode] 4-step workflow / [Batch Mode] multi-file queue
+        # Mode tabs: [Single Mode] / [Batch Mode] / [PCB Mode]
         self._notebook = ttk.Notebook(self)
         self._notebook.pack(fill=tk.BOTH, expand=True)
 
         self._single_tab = tk.Frame(self._notebook, background=COLORS["app_bg"])
         self._batch_panel = BatchPanel(self._notebook, config_path=self._config_path)
+        self._pcb_panel = PcbPanel(self._notebook, config_path=self._config_path)
 
         self._notebook.add(self._single_tab, text="  Single Mode  ")
         self._notebook.add(self._batch_panel, text="  Batch Mode  ")
+        self._notebook.add(self._pcb_panel, text="  PCB Mode  ")
         self._notebook.bind("<<NotebookTabChanged>>", self._on_mode_changed)
 
         # 1. Elevated white top header card split cleanly into 2 compact rows for large fonts
@@ -892,7 +952,9 @@ class Simple3DStepApp(tk.Tk):
             applied_family, applied_size = update_ui_font(
                 self, updated.ui_font_family, updated.ui_font_size
             )
+            self._apply_optimal_window_geometry(expand_only=True)
             self._batch_panel.reload_config()
+            self._pcb_panel.reload_config()
             viewer = updated.viewer_executable or default_viewer_label()
             self._log_panel.append_log(
                 f"Settings saved — Viewer: {viewer} · UI Font: {applied_family} {applied_size}pt"
@@ -912,4 +974,5 @@ class Simple3DStepApp(tk.Tk):
         save_config(self._config, self._config_path)
         self._worker.shutdown()
         self._batch_panel.shutdown()
+        self._pcb_panel.shutdown()
         self.destroy()

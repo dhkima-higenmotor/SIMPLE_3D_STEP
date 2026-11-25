@@ -85,14 +85,19 @@ def cad_worker_main(
 ) -> None:
     """Persistent CAD worker process loop holding OCCT shapes in local RAM."""
     # Import heavy CAD modules only inside the worker process
+    from simple_3d_step.core.idf_parser import load_idf_pair
     from simple_3d_step.core.occt_compat import configure_occt_parallelism
+    from simple_3d_step.core.pcb_simplifier import simplify_pcb_assembly
     from simple_3d_step.core.solidifier import simplify_assembly_to_single_solid
     from simple_3d_step.core.step_io import (
+        load_pcb_assembly,
         load_step_assembly,
         make_compound_from_parts,
+        save_colored_assembly_to_step,
         save_shape_to_step,
     )
     from simple_3d_step.core.visibility import analyze_visibility
+    from simple_3d_step.models import PcbSimplifyConfig
 
     worker_threads: Optional[int] = max_threads
     configure_occt_parallelism(max_threads=worker_threads)
@@ -268,6 +273,78 @@ def cad_worker_main(
                     (
                         "done",
                         (cmd_id, "export_result_preview", {"output_path": str(saved)}),
+                    )
+                )
+
+            elif cmd_name == "pcb_simplify":
+                in_path = Path(payload["step_path"])
+                out_path = Path(payload["output_path"])
+                bdf_raw = payload.get("bdf_path")
+                ldf_raw = payload.get("ldf_path")
+                pcb_cfg: PcbSimplifyConfig = payload.get("config") or PcbSimplifyConfig()
+                orig_size = in_path.stat().st_size if in_path.exists() else 0
+
+                def _sub_prog(lo: float, hi: float):
+                    def _cb(frac: float, text: str) -> None:
+                        _progress(lo + (hi - lo) * max(0.0, min(1.0, float(frac))), text)
+                    return _cb
+
+                pcb_asm = load_pcb_assembly(
+                    in_path,
+                    progress_cb=_sub_prog(0.00, 0.25),
+                    cancel_check=_is_cancelled,
+                )
+                idf_data = (
+                    load_idf_pair(bdf_raw, ldf_raw)
+                    if (pcb_cfg.use_idf_supplement and bdf_raw)
+                    else None
+                )
+                pcb_res = simplify_pcb_assembly(
+                    pcb_asm,
+                    pcb_cfg,
+                    idf_data=idf_data,
+                    progress_cb=_sub_prog(0.25, 0.85),
+                    cancel_check=_is_cancelled,
+                )
+                if _is_cancelled():
+                    raise InterruptedError("Operation cancelled by user.")
+
+                _progress(0.88, f"Saving colored PCB STEP: {out_path.name}")
+                saved = save_colored_assembly_to_step(
+                    pcb_res.parts,
+                    out_path,
+                    root_name=pcb_res.root_name,
+                    schema=pcb_cfg.step_schema,
+                    unit=pcb_res.unit,
+                    preserve_colors=pcb_cfg.preserve_colors,
+                )
+                _progress(1.0, "PCB simplification saved")
+                evt_queue.put(
+                    (
+                        "done",
+                        (
+                            cmd_id,
+                            "pcb_simplify",
+                            {
+                                "output_path": str(saved),
+                                "orig_size_bytes": orig_size,
+                                "size_bytes": saved.stat().st_size,
+                                "board_count": pcb_res.board_count,
+                                "component_count": pcb_res.component_count,
+                                "cylinder_count": pcb_res.cylinder_count,
+                                "fused_count": pcb_res.fused_count,
+                                "box_count": pcb_res.box_count,
+                                "idf_matched_count": pcb_res.idf_matched_count,
+                                "idf_added_count": pcb_res.idf_added_count,
+                                "excluded_small_count": pcb_res.excluded_small_count,
+                                "removed_text_bodies": pcb_res.removed_text_bodies,
+                                "original_bodies": pcb_res.original_bodies,
+                                "original_faces": pcb_res.original_faces,
+                                "simplified_faces": pcb_res.simplified_faces,
+                                "elapsed_seconds": pcb_res.elapsed_seconds,
+                                "logs": list(pcb_res.logs),
+                            },
+                        ),
                     )
                 )
 

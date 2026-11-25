@@ -8,7 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +49,20 @@ class AppConfig:
 
     # Parallel batch worker count (0 = Auto based on CPU cores)
     batch_workers: int = 0
+
+    # PCB Mode parameters (Altium STEP + IDF simplification)
+    pcb_simplify_leads: bool = True
+    pcb_detect_cylinders: bool = True
+    pcb_cylinder_circularity_min: float = 0.80
+    pcb_remove_text_features: bool = True
+    pcb_small_part_box_mm: float = 4.0
+    pcb_preserve_colors: bool = True
+    pcb_use_idf_supplement: bool = True
+    pcb_keep_board_holes: bool = True
+    pcb_min_board_hole_mm: float = 0.8
+    pcb_exclude_small_part_mm: float = 0.0
+    pcb_min_color_brightness: float = 0.12
+    pcb_idf_default_color: list[float] = field(default_factory=lambda: [0.35, 0.35, 0.38])
 
 
 def resolve_batch_workers(configured: int = 0, task_count: int = 0) -> int:

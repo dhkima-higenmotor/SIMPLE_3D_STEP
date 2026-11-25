@@ -100,12 +100,14 @@ def test_unified_app_has_single_and_batch_tabs() -> None:
     app = Simple3DStepApp()
     try:
         app.update()
-        assert len(app._notebook.tabs()) == 2
+        assert len(app._notebook.tabs()) == 3
         assert "Single Mode" in app._notebook.tab(0, "text")
         assert "Batch Mode" in app._notebook.tab(1, "text")
+        assert "PCB Mode" in app._notebook.tab(2, "text")
         assert app._current_mode() == "single"
-        # Batch CAD worker starts lazily, only once its tab is opened
+        # Batch & PCB CAD workers start lazily, only once their tabs are opened
         assert app._batch_panel._worker is None
+        assert app._pcb_panel._worker is None
 
         app._select_mode("batch")
         app.update()

@@ -100,12 +100,12 @@ class PartTreePanel(tk.Frame):
         headings = {
             "keep": ("Keep", 52, tk.CENTER),
             "id": ("#", 36, tk.E),
-            "name": ("Part Name", 150, tk.W),
-            "visibility": ("Visibility (%)", 92, tk.E),
-            "volume": ("Volume (mm³)", 105, tk.E),
-            "faces": ("Faces", 58, tk.E),
-            "status": ("Status", 100, tk.CENTER),
-            "path": ("Assembly Path", 167, tk.W),
+            "name": ("Part Name", 155, tk.W),
+            "visibility": ("Visibility (%)", 114, tk.E),
+            "volume": ("Volume (mm³)", 126, tk.E),
+            "faces": ("Faces", 62, tk.E),
+            "status": ("Status", 120, tk.CENTER),
+            "path": ("Assembly Path", 210, tk.W),
         }
 
         for col, (label, width, anchor) in headings.items():

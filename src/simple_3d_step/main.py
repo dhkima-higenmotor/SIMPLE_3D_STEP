@@ -222,6 +222,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Open the GUI on the Batch Mode tab (sequential multi-file simplify)",
     )
+    parser.add_argument(
+        "--pcb",
+        action="store_true",
+        help="Open the GUI on the PCB Mode tab (Altium PCB STEP + IDF simplifier)",
+    )
     parser.add_argument("-i", "--input", help="Input STEP file path for CLI mode")
     parser.add_argument("-o", "--output", help="Output STEP file path for CLI mode")
     parser.add_argument("--views", type=int, default=64, help="Number of Fibonacci sphere viewpoints")
@@ -256,8 +261,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     step_files = [Path(p).resolve() for p in args.step_file]
 
-    # Multiple files (or --batch) open the Batch Mode tab; one file opens Single Mode
-    start_mode = "batch" if (args.batch or len(step_files) > 1) else "single"
+    # --pcb opens PCB Mode; multiple files (or --batch) open Batch Mode; one file opens Single Mode
+    if args.pcb:
+        start_mode = "pcb"
+    elif args.batch or len(step_files) > 1:
+        start_mode = "batch"
+    else:
+        start_mode = "single"
     initial_step = step_files[0] if (step_files and start_mode == "single") else None
 
     import tkinter as tk

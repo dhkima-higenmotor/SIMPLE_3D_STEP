@@ -937,7 +937,137 @@ dynamically via the `"configure_threads"` IPC command before each batch run.
 
 ---
 
-## 7. Complexity and parameter guide
+## 7. PCB Mode: Altium STEP + IDF per-component simplification
+
+Mechanical assemblies (Sections 3–5) remove hidden internal parts and fuse everything into
+one solid. Electronic PCB assemblies require the opposite semantic contract: **keep every
+mounted component separate, simplify each component to one watertight analytic solid with
+its original color and identity preserved, and supplement missing parts from Altium IDF
+(`.bdf`/`.ldf`)**.
+
+### 7.1 Two-level XCAF hierarchy extraction & prototype caching
+
+Altium Designer STEP exports follow a characteristic two-level XCAF graph under the root
+assembly `PCB`:
+
+```text
+PCB (root assembly)
+  ├── occurrence_ref ('856') ──▶ RefDes assembly ('U1')
+  │     └── model_ref ('855') ──▶ Leaf part/model ('User Library-CSG324')
+  └── occurrence_ref ('646') ──▶ RefDes assembly ('J2')
+        └── model_ref ('645') ──▶ ... ──▶ Leaf part ('TF31-20S-0_5SH_PRT-215090.PRT')
+```
+
+`core/step_io.py::load_pcb_assembly` resolves both the **component designator (`ref_des`)**
+from the referred component assembly label and the deepest meaningful **leaf part name
+(`leaf_name`)**, filtering out Altium's numeric occurrence IDs and generic translator
+strings. Because identical SMD footprints (e.g., 170 `C2012` capacitors) share the same
+prototype label, volume/area/face-count and area-weighted RGB face colors are invariant
+under rigid `TopLoc_Location` transforms and are cached per prototype label entry
+(`TDF_Tool.Entry_s`), reducing multi-thousand-face load times by an order of magnitude.
+
+On export (`save_colored_assembly_to_step`), identical canonical primitives (boxes
+canonicalized to $w \ge d$ by $\pm 90^\circ$ rotation, or vertical cylinders) share a
+single XCAF prototype solid `PRODUCT` named `leaf_name`, while each mounted instance is
+emitted as a 2-level Altium-compatible `RefDes → LeafName` assembly node referencing that
+prototype via `TopLoc_Location`. This preserves both component naming levels and colors
+(`AP214`/`AP242`) while compressing large PCBs by **~60–90%**.
+
+### 7.2 PCB substrate cleanup and selective via defeaturing
+
+Board solid(s) are identified by large XY footprint area ($A_{xy} \ge 0.35 A_{\max}$),
+thin slab thickness ($0.25 \le \Delta z \le 6.5\text{ mm}$, aspect $\ge 5$), and optional
+naming cues (`PCB`, `BOARD`, `FR4`, `SUBSTRATE`). Unlike mounted components, the board's
+outer contour and mounting holes are never boxified. When `pcb_min_board_hole_mm`
+$d_{\min} > 0$ (default $0.8\text{ mm}$), interior vertical cylindrical faces
+($|\mathbf{a}\cdot\hat{\mathbf{z}}| > 0.95$) with diameter $2r < d_{\min}$ are removed in a
+single `BRepAlgoAPI_Defeaturing` pass (guarded by `solid_count == 1` and
+$V' \ge 0.98 V$), followed by `ShapeUpgrade_UnifySameDomain`.
+
+### 7.3 Full-vertex 2D rotating-calipers OBB
+
+Altium often bakes component rotations (e.g., $45^\circ$ or $115^\circ$ FPC connectors)
+directly into leaf B-Rep coordinates rather than XCAF instance transforms. To guarantee an
+exact tight envelope without partial-geometry shrinkage on high-vertex packages (such as
+324-ball BGAs), `core/pcb_simplifier.py::_collect_shape_points` maps **all** unique
+topological vertices via `TopExp.MapShapes_s(..., TopAbs_VERTEX)` (plus curved-edge
+samples when vertex count is sparse), projects them to XY, computes the 2D convex hull,
+and evaluates exact rotating calipers over every hull edge angle $\theta \in [0, \pi/2)$:
+
+```math
+\theta^* = \arg\min_{\theta}\;
+\bigl(\max_i u_i(\theta) - \min_i u_i(\theta)\bigr)\,
+\bigl(\max_i v_i(\theta) - \min_i v_i(\theta)\bigr),
+```
+
+where $(u_i, v_i) = (x_i\cos\theta + y_i\sin\theta,\; -x_i\sin\theta + y_i\cos\theta)$.
+Angles within $1^\circ$ of $0^\circ/90^\circ$ (or within $1.5\%$ of axis-aligned area)
+snap cleanly to axis alignment while arbitrary angles (e.g., $115.00^\circ$) are preserved
+to machine precision.
+
+### 7.4 Per-component geometric classification & single-solid fusion
+
+For each non-board component (skipping parts whose OBB max dimension satisfies
+$\max(w, d, h) \le \text{pcb\_exclude\_small\_part\_mm}$ when enabled):
+
+1. **Engraved/embossed text & logo removal**: Tiny sub-bodies ($V < 0.008 V_{\text{main}}$,
+   $\min(\Delta x,\Delta y,\Delta z) < 0.25\text{ mm}$) lying strictly inside the main
+   body's XY footprint near its top/bottom surface are dropped prior to simplification.
+2. **Cylindrical components (electrolytic capacitors, radial cans, round inductors)**:
+   Coaxial `GeomAbs_Cylinder` faces are accumulated along the dominant cylinder axis
+   $\hat{\mathbf{a}}$. A body is classified as cylindrical when lateral area coverage
+   $A_{\text{cyl}} / (2\pi r h)$, cylindrical share of total area, radial containment
+   ($r_{\max} \le 1.28 r$), and volume ratio $V / (\pi r^2 h) \in [0.55, 1.20]$ all pass.
+   It is replaced by an exact `BRepPrimAPI_MakeCylinder` (3 faces). If a vertical can sits
+   on a noticeably wider flat square base ($\max(w_b, d_b) > 2.16 r$), the base is boxified
+   and fused with the cylinder (`0.05 mm` axial overlap) into 1 watertight solid.
+3. **Multi-body ICs & connectors (body + heatsink + lead/pin banks)**:
+   Non-enclosed sub-bodies are segmented into major blocks (heatsinks/tabs/shrouds,
+   $V \ge 0.12 V_{\text{main}}$) and peripheral leads/pins. Leads are assigned to the six
+   local OBB faces (`left`, `right`, `front`, `back`, `bottom`, `top`), split along wide
+   empty notches via 1D gap clustering, and collapsed into one rectangular prism per bank
+   with a $0.06\text{ mm}$ inward overlap into the main body box. All primitives are fused
+   via `BRepAlgoAPI_Fuse` + `ShapeUpgrade_UnifySameDomain` into 1 watertight solid (with
+   fuzzy retry and guaranteed single-OBB-box fallback).
+4. **Compact SMDs & general parts**: Parts with $\max(w, d, h) \le \text{pcb\_small\_part\_box\_mm}$
+   collapse directly into one canonicalized OBB box (6 faces).
+
+### 7.5 Representative color extraction & minimum-brightness lift
+
+Each component's color is computed as the area-weighted dominant RGB across faces of its
+largest-volume body (ignoring tiny marking faces $< 0.5\%$ of the largest face). Because
+pure-black IC/connector housings (`(0, 0, 0)`) obscure edges and shading in CAD viewers,
+`_ensure_min_brightness` enforces an ITU-R BT.709 luminance floor
+$L_{\min} = \text{pcb\_min\_color\_brightness}$ (default $0.12$ in OCCT linear RGB):
+
+```math
+L = 0.2126\,R + 0.7152\,G + 0.0722\,B.
+```
+
+If $L < L_{\min}$: near-black achromatic colors map to neutral dark charcoal
+$(L_{\min}, L_{\min}, L_{\min})$; tinted dark colors scale uniformly by $L_{\min}/L$ to
+preserve hue (blending smoothly toward white only if any channel would exceed $1.0$).
+
+### 7.6 Altium IDF (`.bdf`/`.ldf`) alignment & strict non-overwrite supplementation
+
+`core/idf_parser.py` parses IDF 2.0/3.0 board (`.bdf`/`.brd`/`.emn`) and library
+(`.ldf`/`.pro`/`.emp`) files (`MM` or `THOU` $\times 0.0254$, quoted identifiers, arcs and
+$360^\circ$ circular footprints). Alignment to the STEP PCB board evaluates candidate
+$90^\circ$-multiple XY rotations against STEP component centroids, then refines `(dx, dy)`
+by the median residual of matched components (snapping sub-$0.05\text{ mm}$ drift to
+exact `0.0`). `BOTTOM`-side placements mirror footprint $X$ before rotation and extrude
+downward from `board_z_bottom - z_offset`.
+
+To guarantee zero pollution of established STEP models, deduplication checks **exact
+case-insensitive `RefDes` match** against STEP components first, followed by token and
+same-side XY overlap checks ($\text{IoU}_{\min} \ge 0.30$). Already-present (and
+intentionally small-part-excluded) STEP components are never replaced; zero-height
+`HOLE`/`FIDUCIAL` records are skipped; only truly missing placed components are added as
+rotated single-solid boxes.
+
+---
+
+## 8. Complexity and parameter guide
 
 Let $P$ = parts, $F$ = total faces, $T$ = total triangles, $n_v$ = views,
 $m$ = grid resolution, $B\le P$ = borderline parts, $n_s$ = samples/part,
@@ -979,7 +1109,21 @@ drops.
 | `unify_same_domain` | on | face compaction, guarded |
 | `keep_largest_only` | on | discards unbridgeable islands instead of exporting a compound |
 | `step_schema` | AP214 | AP214 / AP242 / AP203 |
-| `batch_workers` / CLI `-j` | 0 (Auto) | concurrent CAD worker processes in Batch Mode / multi-file CLI (`0` = auto up to 6 with per-worker thread budgeting) |
+| `batch_workers` / CLI `-j` | 0 (Auto) | concurrent CAD worker processes in Batch / PCB Mode / multi-file CLI (`0` = auto up to 6 with per-worker thread budgeting) |
+
+**Choosing PCB Mode parameters.**
+
+| Parameter | Default | Effect |
+| :--- | :---: | :--- |
+| `pcb_min_board_hole_mm` | 0.8 mm | plug vertical board via holes smaller than this diameter (`0` = keep all) |
+| `pcb_exclude_small_part_mm` | 0.0 mm | exclude non-board components with OBB max dimension $\le$ threshold (`0` = keep all) |
+| `pcb_min_color_brightness` | 0.12 | minimum linear RGB luminance floor for dark/black housings (`0` = off) |
+| `pcb_detect_cylinders` / `pcb_cylinder_circularity_min` | on / 0.80 | simplify electrolytic caps and round cans as exact cylinders |
+| `pcb_simplify_leads` | on | group IC/connector lead arrays into side-bank prisms fused with body/heatsink |
+| `pcb_remove_text_features` | on | drop tiny surface-mounted engraved/embossed text & logo bodies |
+| `pcb_small_part_box_mm` | 4.0 mm | collapse compact SMD components directly into 1 canonical OBB box |
+| `pcb_preserve_colors` | on | preserve representative body RGB colors in `AP214`/`AP242` XCAF STEP |
+| `pcb_use_idf_supplement` | on | match sibling `.bdf`/`.ldf` IDF files and add STEP-missing parts as boxes |
 
 The inset and the grid pitch are coupled: the code enforces
 $\text{inset} \ge 1.6h$, so a coarser grid automatically widens the protected shell. If a
@@ -988,7 +1132,7 @@ since filling it would risk crossing the exterior surface.
 
 ---
 
-## 8. Assumptions and limitations
+## 9. Assumptions and limitations
 
 - **Watertight B-Rep input.** Input solids are expected to be closed/manifold. Open
   shells can be promoted to solids, but their enclosed volume is undefined; results are
@@ -1015,7 +1159,7 @@ since filling it would risk crossing the exterior surface.
 
 ---
 
-## 9. References
+## 10. References
 
 1. OpenCASCADE Technology — *Modeling Algorithms*, *Data Exchange*, `BRepGProp`,
    `BRepAlgoAPI`, `ShapeFix`, `ShapeUpgrade` documentation.

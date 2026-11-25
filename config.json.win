@@ -19,5 +19,17 @@
   "unify_same_domain": true,
   "keep_largest_only": true,
   "step_schema": "AP214",
-  "batch_workers": 0
+  "batch_workers": 0,
+  "pcb_simplify_leads": true,
+  "pcb_detect_cylinders": true,
+  "pcb_cylinder_circularity_min": 0.8,
+  "pcb_remove_text_features": true,
+  "pcb_small_part_box_mm": 4.0,
+  "pcb_preserve_colors": true,
+  "pcb_use_idf_supplement": true,
+  "pcb_keep_board_holes": true,
+  "pcb_min_board_hole_mm": 0.8,
+  "pcb_exclude_small_part_mm": 0.0,
+  "pcb_min_color_brightness": 0.12,
+  "pcb_idf_default_color": [0.35, 0.35, 0.38]
 }
