@@ -30,11 +30,11 @@ such that
 ```math
 \partial\Omega^{\ast} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
 \qquad
-\operatorname{interior}(\Omega^{\ast}) \;\supset\; \operatorname{interior}(\Omega),
+\mathrm{interior}(\Omega^{\ast}) \;\supset\; \mathrm{interior}(\Omega),
 ```
 
 where $\Omega_{\text{ext}}$ is the union of *externally visible* parts and
-$\operatorname{interior}$ means the enclosed material volume. In words: **keep every
+$\mathrm{interior}$ means the enclosed material volume. In words: **keep every
 exterior B-Rep surface exactly as authored, remove hidden internal parts, and fill the
 enclosed interior so cross-sections show solid material.**
 
@@ -121,17 +121,17 @@ rest of the pipeline shape-agnostic: everything downstream operates on a flat li
 
 ### 2.2 Geometric invariants
 
-Per leaf, OpenCASCADE's exact B-Rep integral properties (`BRepGProp`) are evaluated:
+Per leaf, OpenCASCADE's exact B-Rep integral properties (`BRepGProp`) are evaluated
+analytically on the B-Rep faces (planes, cylinders, NURBS, …), not on a mesh:
 
-- **Volume** by the divergence theorem with $\nabla\cdot\mathbf{x}=3$:
+```math
+V = \int_{\Omega} dV
+  = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
+\qquad
+A = \int_{\partial\Omega} dA ,
+```
 
-  ```math
-  V = \int_{\Omega} dV
-    = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
-  ```
-
-  evaluated analytically on the B-Rep faces (planes, cylinders, NURBS, …), not on a mesh.
-- **Surface area** $A=\int_{\partial\Omega} dA$.
+- **Volume** $V$ (by the divergence theorem with $\nabla\cdot\mathbf{x}=3$) and **surface area** $A$.
 - **Axis-aligned bounding box** from `Bnd_Box` (tight, per-shape).
 - **Face count** by `TopExp_Explorer(..., TopAbs_FACE)`.
 
@@ -442,13 +442,13 @@ running clearances (rotor/cover gaps, bearing fits) of a few tenths of a millime
 $r_c = g/h$:
 
 ```math
-D_O=\operatorname{EDT}(\neg O),\quad
+D_O=\mathrm{EDT}(\neg O),\quad
 O_r = \left\{D_O \le r_c\right\},\quad
 \text{filled} = \left\{\,x \in \neg O_r : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\},
 ```
 
 ```math
-E = \left\{\,x : \operatorname{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
+E = \left\{\,x : \mathrm{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
 \qquad
 \text{inside} = \left\{\,x \in \neg E : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
 ```
@@ -459,7 +459,7 @@ preserving the outer boundary. The closing is only applied when $r_c \ge 0.75$ v
 a tiny bridge-gap setting can never distort the cavity. The result is a sealed *envelope*
 whose enclosed air is the cavity volume between parts.
 
-**Strict inward safety inset.** With $D_E=\operatorname{EDT}(E)$ in millimetres:
+**Strict inward safety inset.** With $D_E=\mathrm{EDT}(E)$ in millimetres:
 
 ```math
 C_{\text{safe}} = \left\{\,x \in \text{inside} \;:\; D_E(x) \ge \max\!\left(\texttt{core\_inset\_mm},\ 1.6\,h\right)\right\}.
@@ -496,7 +496,7 @@ wide-open line of sight to the outside (heatsink fin gaps, counterbores, cable c
 
 ```math
 \kappa(C)=\frac{\pi\,r_{\max}^2}{|C|},
-\qquad r_{\max}=\max\operatorname{EDT}(C),
+\qquad r_{\max}=\max\mathrm{EDT}(C),
 ```
 
 and the axis with the largest mean $\kappa$ is used as the extrusion direction. Choosing
@@ -504,7 +504,7 @@ the axis that produces the roundest cross-sections maximizes the number of analy
 cylinders (cheap, smooth) and minimizes polygon approximation error.
 
 **Analytic primitive extraction.** Starting from a base slab thickness of
-$w=\max(2,\operatorname{round}(3/h))$ voxels (≈3 mm), each slab is **greedily extended**
+$w=\max(2,\mathrm{round}(3/h))$ voxels (≈3 mm), each slab is **greedily extended**
 along the slice axis while the cumulative cross-section remains constant:
 
 ```math
@@ -525,7 +525,7 @@ while long uniform bores and rectangular housings collapse into single tall prim
 rather than dozens of 3 mm slices. Holes are filled, connected components smaller than
 20 mm² are dropped, and each component becomes either
 
-- a **cylinder** if its inscribed radius $r^{\ast}=h\max\operatorname{EDT}$ satisfies
+- a **cylinder** if its inscribed radius $r^{\ast}=h\max\mathrm{EDT}$ satisfies
   $r^{\ast}\ge 2.5$ mm and $\pi r^{\ast 2}/|C_k|\ge 0.84$, with radius $\max(r^{\ast}-0.1,0.5)$ mm;
   adjacent coaxial cylinders (center shift $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$
   mm) are further coalesced into one cylinder with conservative radius
@@ -638,32 +638,34 @@ nesting; a physically impossible loss of material is still rejected.
 If the fuse leaves more than one solid, nearby islands are connected with **hidden internal
 pins** rather than deleted. With the main body $M$ (largest volume) and island $I$:
 
-1. Skip if $I$ lies strictly inside $M$: bounding boxes nested **and**
-   `BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN`.
-2. Compute the closest vertex pair between tessellated surfaces (main body and islands
-   batch-meshed together at 0.25 mm via `mesh_shapes_in_parallel_buckets`, queried in
-   parallel via `cKDTree.query(..., workers=-1)`):
+**Step 1 — Containment check.** Skip if $I$ lies strictly inside $M$: bounding boxes nested
+**and** `BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN`.
 
-   ```math
-   d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
-   (a^{\ast},b^{\ast})=\arg\min .
-   ```
+**Step 2 — Closest surface pair.** Compute the closest vertex pair between tessellated
+surfaces (main body and islands batch-meshed together at 0.25 mm via
+`mesh_shapes_in_parallel_buckets`, queried in parallel via `cKDTree.query(..., workers=-1)`):
 
-3. If $d_{\min} > g_{\max}$ (`max_island_gap_mm`, default 3 mm), leave the island
-   untouched (it will be excluded by `keep_largest_only` or remain a separate body if that
-   option is disabled).
-4. Otherwise build a pin along
-   $\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ starting at $a^{\ast}-\hat{\mathbf{u}}p$ with
+```math
+d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
+(a^{\ast},b^{\ast})=\arg\min .
+```
 
-   ```math
-   r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
-   \qquad
-   p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
-   ```
+**Step 3 — Gap threshold.** If $d_{\min} > g_{\max}$ (`max_island_gap_mm`, default 3 mm),
+leave the island untouched (it will be excluded by `keep_largest_only` or remain a separate
+body if that option is disabled).
 
-   length $d_{\min}+2p$ so it penetrates both bodies.
-5. Fuse `main + pin` and then `+ island`, each under the pair guard, and require a single
-   resulting solid; purge voids afterwards.
+**Step 4 — Analytic pin bridge.** Otherwise build a pin along
+$\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ starting at $a^{\ast}-\hat{\mathbf{u}}p$
+with length $d_{\min}+2p$ so it penetrates both bodies:
+
+```math
+r = \mathrm{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
+\qquad
+p = \mathrm{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right).
+```
+
+**Step 5 — Guarded fuse and void purge.** Fuse `main + pin` and then `+ island`, each under
+the pair guard, and require a single resulting solid; purge voids afterwards.
 
 Pins are short, thin, and lie in the internal clearance between near-touching parts, so
 they are invisible in exterior views and on section cuts outside the joint region.
@@ -698,7 +700,7 @@ Each defect class is treated explicitly under strict volume, validity, and toler
 ### 5.1 Strict 2-manifold healing and Parasolid edge precision
 
 1. **Boolean internal-slit & sub-precision guard (`_batch_fuse_safe`, `_fuse_two_safe`).**
-   After exact $\text{fuzzy}=0$ fusion succeeds, an $O(N)$ outer-shell audit inspects `TopAbs_INTERNAL` edges and sub-Parasolid edges ($L < 10^{-5}\text{ mm}$). Only when such defects appear (typically from nanometer-scale NURBS-to-cylinder tangency overlaps or mating noise) does the fuse retry at ultra-tight $\text{fuzzy} \in \{5\times 10^{-5},\, 10^{-4}\}\text{ mm}$, upgrading only if `BRepCheck` validity is preserved and the defect tuple strictly decreases.
+   After exact $\text{fuzzy}=0$ fusion succeeds, an $O(N)$ outer-shell audit inspects `TopAbs_INTERNAL` edges and sub-Parasolid edges ($L < 10^{-5}\text{ mm}$). Only when such defects appear (typically from nanometer-scale NURBS-to-cylinder tangency overlaps or mating noise) does the fuse retry at ultra-tight $\text{fuzzy} = 5\times 10^{-5}\text{ mm}$ or $10^{-4}\text{ mm}$, upgrading only if `BRepCheck` validity is preserved and the defect tuple strictly decreases.
 2. **Non-manifold edge & vertex healing (`_heal_non_manifold_topology`).**
    Before periodic splitting, an $O(N)$ topology pass locates every non-degenerated edge with $>2$ incident faces and every pinched vertex whose incident faces partition into $>1$ edge-connected fan. Each zero-thickness contact is bridged by fusing a microscopic analytic capsule/pipe or sphere ($r = 0.05\text{ mm}$, escalating once to $0.10\text{ mm}$ only for stubborn grazing angles), followed by void-shell purging and outward orientation. Volume change is negligible ($<0.01\%$) while the boundary becomes strictly 2-manifold.
 3. **Sub-Parasolid edge collapse (`_collapse_sub_precision_edges`).**
@@ -755,52 +757,59 @@ features (e.g. 0.01 mm connector steps) are never collapsed or tolerance-bloated
 face fails are three staged repairs attempted in order, each guarded by validity,
 watertightness, void-shell, volume, non-manifold, and edge-tolerance checks:
 
-1. **Progressive tight sliver collapse (Step A).** `ShapeFix_FixSmallFace` escalates gently
-   over $(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ and is accepted only
-   when unmeshed faces strictly decrease and maximum edge tolerance stays within
-   $\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$.
-2. **Exact curved-edge midpoint splitting (Step B).** Long curved edges are split **only
-   on failing faces** (`_split_edge_exact_subedges`): the sub-edges lie on the same 3D
-   curve, so geometric error is exactly zero, while the maximum chord sagitta of the
-   viewer's tessellation drops. For a circular arc of radius $R$ and angle $\theta$, chord
-   deviation is
+**Step A — Progressive tight sliver collapse.** `ShapeFix_FixSmallFace` escalates gently
+over $(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ and is accepted only
+when unmeshed faces strictly decrease and maximum edge tolerance stays within
+$\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$.
 
-   ```math
-   \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
-   ```
+**Step B — Exact curved-edge midpoint splitting.** Long curved edges are split **only
+on failing faces** (`_split_edge_exact_subedges`): the sub-edges lie on the same 3D
+curve, so geometric error is exactly zero, while the maximum chord sagitta of the
+viewer's tessellation drops. For a circular arc of radius $R$ and angle $\theta$, chord
+deviation is
 
-   so halving $\theta$ quarters the deviation without adding faces.
-3. **Tangent pinch-wire hole splitting (Step C).** Some CAD models contain a planar face
-   where an inner hole wire of radius $r$ at distance $d$ is internally tangent to the
-   outer boundary wire of radius $R = d + r$, touching it at a single pinch-point
-   $p_{\text{pinch}}$. While Parasolid-based viewers tolerate this pinch topology,
-   OCCT's `STEPControl_Reader` clamps incident edge parameter bounds within STEP
-   `UNCERTAINTY`, leaving tiny opposite closing segments on the outer and inner wires at
-   $p_{\text{pinch}}$. `BRepMesh_IncrementalMesh` rejects the entire face with
-   `IMeshData_SelfIntersectingWire | IMeshData_Failure` (0 triangles), hiding the face
-   and downgrading the solid to *Opened* in CAD Assistant.
+```math
+\delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
+```
 
-   `_split_tangent_pinch_wire_faces` resolves this automatically with **0.0 mm geometric
-   distortion**:
-   - Detects planar failing faces with an inner wire $W_{\text{in}}$ satisfying
-     $\operatorname{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
-     (`BRepExtrema_DistShapeShape`) and unifies any unmerged coincident vertex pair at
-     $p_{\text{pinch}}$ (`ShapeBuild_ReShape`, `TopAbs_FORWARD`) so no figure-8 bow-tie
-     wire forms.
-   - Computes the hole centroid $c$ projected onto the face plane $\Pi$ and builds a
-     cutting plane through $c$ with normal along the in-plane pinch vector
-     $\mathbf{n}_{\text{cut}} = \operatorname{proj}_{\Pi}(p_{\text{pinch}} - c)$
-     (parallel to the common tangent at $p_{\text{pinch}}$).
-   - Intersects the cutting plane exclusively with the failing face
-     (`BRepAlgoAPI_Section`), filters to the local chord edges incident to $W_{\text{in}}$
-     ($\min(\operatorname{dist}(v_1, W_{\text{in}}), \operatorname{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)
-     so neighboring unrelated holes are never touched, and splits the face in place via
-     `BRepFeat_SplitShape`, followed by `ShapeFix_Shape` and a 3D-curve STEP round-trip
-     audit across all 5 CAD Assistant deflection profiles.
+so halving $\theta$ quarters the deviation without adding faces.
 
-   The pinched inner hole splits into clean non-pinched single-wire crescent sub-faces on
-   the exact original plane, preserving volume and surface area identically while
-   guaranteeing 100 % closed-solid rendering and clipping-plane capping in CAD Assistant.
+**Step C — Tangent pinch-wire hole splitting.** Some CAD models contain a planar face
+where an inner hole wire of radius $r$ at distance $d$ is internally tangent to the
+outer boundary wire of radius $R = d + r$, touching it at a single pinch-point
+$p_{\text{pinch}}$. While Parasolid-based viewers tolerate this pinch topology,
+OCCT's `STEPControl_Reader` clamps incident edge parameter bounds within STEP
+`UNCERTAINTY`, leaving tiny opposite closing segments on the outer and inner wires at
+$p_{\text{pinch}}$. `BRepMesh_IncrementalMesh` rejects the entire face with
+`IMeshData_SelfIntersectingWire | IMeshData_Failure` (0 triangles), hiding the face
+and downgrading the solid to *Opened* in CAD Assistant.
+
+`_split_tangent_pinch_wire_faces` resolves this automatically with **0.0 mm geometric
+distortion**:
+
+- Detects planar failing faces with an inner wire $W_{\text{in}}$ satisfying
+  $\mathrm{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
+  (`BRepExtrema_DistShapeShape`) and unifies any unmerged coincident vertex pair at
+  $p_{\text{pinch}}$ (`ShapeBuild_ReShape`, `TopAbs_FORWARD`) so no figure-8 bow-tie
+  wire forms.
+- Projects the hole centroid $c$ onto the face plane $\Pi$ and builds a cutting plane
+  through $c$ with normal $\mathbf{n}_{\text{cut}}$ along the in-plane pinch direction
+  (parallel to the common tangent at $p_{\text{pinch}}$):
+
+```math
+\mathbf{n}_{\text{cut}} = \mathrm{proj}_{\Pi}\!\left(p_{\text{pinch}} - c\right).
+```
+
+- Intersects the cutting plane exclusively with the failing face
+  (`BRepAlgoAPI_Section`), filters to the local chord edges incident to $W_{\text{in}}$
+  ($\min(\mathrm{dist}(v_1, W_{\text{in}}), \mathrm{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)
+  so neighboring unrelated holes are never touched, and splits the face in place via
+  `BRepFeat_SplitShape`, followed by `ShapeFix_Shape` and a 3D-curve STEP round-trip
+  audit across all 5 CAD Assistant deflection profiles.
+
+The pinched inner hole splits into clean non-pinched single-wire crescent sub-faces on
+the exact original plane, preserving volume and surface area identically while
+guaranteeing 100 % closed-solid rendering and clipping-plane capping in CAD Assistant.
 
 ### 5.5 Final validation
 

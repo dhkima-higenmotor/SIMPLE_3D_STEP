@@ -29,11 +29,11 @@ $N$ 개의 솔리드(하우징, 커버, 로터, 기어, 베어링, PCB, 체결�
 ```math
 \partial\Omega^{\ast} \cap \partial\Omega_{\text{ext}} \;\approx\; \partial\Omega_{\text{ext}},
 \qquad
-\operatorname{interior}(\Omega^{\ast}) \;\supset\; \operatorname{interior}(\Omega),
+\mathrm{interior}(\Omega^{\ast}) \;\supset\; \mathrm{interior}(\Omega),
 ```
 
 여기서 $\Omega_{\text{ext}}$ 는 *외부에서 보이는* 부품들의 합집합이고,
-$\operatorname{interior}$ 는 둘러싸인 재료 부피를 뜻합니다. 즉 **외관 B-Rep 곡면은
+$\mathrm{interior}$ 는 둘러싸인 재료 부피를 뜻합니다. 즉 **외관 B-Rep 곡면은
 원본 그대로 유지하고, 숨은 내부 부품은 제거하며, 둘러싸인 내부는 채워서 단면 절단
 시 속이 꽉 찬 재료로 보이게 한다**는 것입니다.
 
@@ -119,17 +119,17 @@ T_{\text{global}} = T_{p_0}\,T_{p_1}\cdots T_{p_k},
 
 ### 2.2 기하 불변량
 
-각 리프에 대해 OpenCASCADE 의 정밀 B-Rep 적분 속성(`BRepGProp`)을 계산합니다.
+각 리프에 대해 OpenCASCADE 의 정밀 B-Rep 적분 속성(`BRepGProp`)을 메쉬가 아니라
+B-Rep 면(평면, 원통, NURBS 등)에서 해석적으로 계산합니다.
 
-- **부피** — $\nabla\cdot\mathbf{x}=3$ 에 대한 발산 정리:
+```math
+V = \int_{\Omega} dV
+  = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
+\qquad
+A = \int_{\partial\Omega} dA ,
+```
 
-  ```math
-  V = \int_{\Omega} dV
-    = \frac{1}{3}\int_{\partial\Omega}\mathbf{x}\cdot\mathbf{n}\,dA ,
-  ```
-
-  메쉬가 아니라 B-Rep 면(평면, 원통, NURBS 등)에서 해석적으로 계산됩니다.
-- **표면적** $A=\int_{\partial\Omega} dA$.
+- **부피** $V$ ($\nabla\cdot\mathbf{x}=3$ 에 대한 발산 정리) 및 **표면적** $A$.
 - **축 정렬 바운딩 박스** — `Bnd_Box` 로 계산한 형상별 타이트 박스.
 - **면 수** — `TopExp_Explorer(..., TopAbs_FACE)`.
 
@@ -437,13 +437,13 @@ O[i,j,k] = \mathbf{1}\!\left[\text{some ray hit voxel }(i,j,k)\right].
 $r_c = g/h$ 에 대해
 
 ```math
-D_O=\operatorname{EDT}(\neg O),\quad
+D_O=\mathrm{EDT}(\neg O),\quad
 O_r = \left\{D_O \le r_c\right\},\quad
 \text{filled} = \left\{\,x \in \neg O_r : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\},
 ```
 
 ```math
-E = \left\{\,x : \operatorname{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
+E = \left\{\,x : \mathrm{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
 \qquad
 \text{inside} = \left\{\,x \in \neg E : \text{label}(x)\neq \text{label}(\mathbf{0})\,\right\}.
 ```
@@ -454,7 +454,7 @@ E = \left\{\,x : \operatorname{EDT}(\text{filled})(x) > r_c\,\right\}\ \cup\ O,
 작게 설정해도 공동 형상이 왜곡되지 않습니다. 결과는 밀폐된 *엔벨로프(envelope)* 이고,
 그 안의 공기 부피가 부품 사이의 공동 부피입니다.
 
-**엄격한 내향 안전 여백.** $D_E=\operatorname{EDT}(E)$ 를 mm 단위로 두면
+**엄격한 내향 안전 여백.** $D_E=\mathrm{EDT}(E)$ 를 mm 단위로 두면
 
 ```math
 C_{\text{safe}} = \left\{\,x \in \text{inside} \;:\; D_E(x) \ge \max\!\left(\texttt{core\_inset\_mm},\ 1.6\,h\right)\right\}.
@@ -490,13 +490,13 @@ x \text{ is carved if } \varsigma(x)\ge 0.15 .
 
 ```math
 \kappa(C)=\frac{\pi\,r_{\max}^2}{|C|},
-\qquad r_{\max}=\max\operatorname{EDT}(C),
+\qquad r_{\max}=\max\mathrm{EDT}(C),
 ```
 
 평균 $\kappa$ 가 가장 큰 축을 압출 방향으로 사용합니다. 가장 둥근 단면을 만드는 축을
 고르면 해석적 원통(저렴하고 매끄러움)의 수가 최대화되고 폴리곤 근사 오차가 최소화됩니다.
 
-**해석적 프리미티브 추출.** 기본 슬래브 두께 $w=\max(2,\operatorname{round}(3/h))$
+**해석적 프리미티브 추출.** 기본 슬래브 두께 $w=\max(2,\mathrm{round}(3/h))$
 복셀(≈3 mm)에서 출발해, 누적 단면이 일정하게 유지되는 동안 슬라이스 축 방향으로
 슬래브를 **탐욕적으로 확장**합니다.
 
@@ -518,7 +518,7 @@ C_k = \bigcap_{j\in\text{slab}} C_{\text{safe}}[:,:,j],
 프리미티브로 통합됩니다. 구멍을 채우고 20 mm² 미만의 연결 요소는 버린 뒤, 각 요소를
 다음 중 하나로 만듭니다.
 
-- 내접 반지름 $r^{\ast}=h\max\operatorname{EDT}$ 가 $r^{\ast}\ge 2.5$ mm 이고
+- 내접 반지름 $r^{\ast}=h\max\mathrm{EDT}$ 가 $r^{\ast}\ge 2.5$ mm 이고
   $\pi r^{\ast 2}/|C_k|\ge 0.84$ 이면 **원통**(반지름 $\max(r^{\ast}-0.1,0.5)$ mm)으로 만들고,
   인접한 동축 원통(중심 이동 $\Delta c \le 0.25$ mm, $|\Delta r| \le 0.35$ mm)은
   보수적 반지름 $r_{\text{merged}} = \min(r_1, r_2) - \tfrac{1}{2}\Delta c$ 의 단일
@@ -626,31 +626,35 @@ V' \ge 0.95\,V .
 Fuse 후 솔리드가 둘 이상 남으면, 가까운 아일랜드는 삭제하지 않고 **숨은 내부 핀**으로
 연결합니다. 주 바디 $M$ (최대 부피)과 아일랜드 $I$ 에 대해
 
-1. $I$ 가 $M$ 안에 완전히 들어 있으면 건너뜁니다. 바운딩 박스가 중첩되고 **동시에**
-   `BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN` 인 경우입니다.
-2. 테셀레이션된 표면(주 바디와 아일랜드를 `mesh_shapes_in_parallel_buckets` 로 0.25 mm
-   일괄 병렬 메싱)에서 최근접 정점 쌍을 병렬 탐색합니다(`cKDTree.query(..., workers=-1)`).
+**단계 1 — 내부 포함 여부 확인.** $I$ 가 $M$ 안에 완전히 들어 있으면 건너뜁니다.
+바운딩 박스가 중첩되고 **동시에**
+`BRepClass3d_SolidClassifier(M, centroid(I)) == TopAbs_IN` 인 경우입니다.
 
-   ```math
-   d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
-   (a^{\ast},b^{\ast})=\arg\min .
-   ```
+**단계 2 — 최근접 표면 쌍 탐색.** 테셀레이션된 표면(주 바디와 아일랜드를
+`mesh_shapes_in_parallel_buckets` 로 0.25 mm 일괄 병렬 메싱)에서 최근접 정점 쌍을
+병렬 탐색합니다(`cKDTree.query(..., workers=-1)`).
 
-3. $d_{\min} > g_{\max}$ (`max_island_gap_mm`, 기본 3 mm)이면 아일랜드를 그대로
-   둡니다(`keep_largest_only` 에 의해 제외되거나, 옵션이 꺼져 있으면 별도 바디로
-   남습니다).
-4. 그렇지 않으면 $\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ 방향으로
-   $a^{\ast}-\hat{\mathbf{u}}p$ 에서 시작하는 핀을 만듭니다.
+```math
+d_{\min}=\min_{a\in I,\; b\in M}\left\|a-b\right\|,\qquad
+(a^{\ast},b^{\ast})=\arg\min .
+```
 
-   ```math
-   r = \operatorname{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
-   \qquad
-   p = \operatorname{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right),
-   ```
+**단계 3 — 간극 임계값 검사.** $d_{\min} > g_{\max}$ (`max_island_gap_mm`, 기본 3 mm)이면
+아일랜드를 그대로 둡니다(`keep_largest_only` 에 의해 제외되거나, 옵션이 꺼져 있으면
+별도 바디로 남습니다).
 
-   길이는 $d_{\min}+2p$ 라서 양쪽 바디에 모두 파고듭니다.
-5. `main + pin` 을 Fuse 한 뒤 `+ island` 를 Fuse 하고(각각 쌍 가드 적용), 결과가 단일
-   솔리드인지 확인한 후 공동을 소거합니다.
+**단계 4 — 해석적 핀 브리지 생성.** 그렇지 않으면
+$\hat{\mathbf{u}}=(b^{\ast}-a^{\ast})/d_{\min}$ 방향으로 $a^{\ast}-\hat{\mathbf{u}}p$
+에서 시작하고 양쪽 바디에 모두 파고들도록 길이가 $d_{\min}+2p$ 인 핀을 만듭니다.
+
+```math
+r = \mathrm{clamp}\!\left(0.28\min\!\left(\dim(I)\right),\;0.3,\;1.5\right),
+\qquad
+p = \mathrm{clamp}\!\left(0.35\min\!\left(\dim(I)\right),\;0.5,\;1.5\right).
+```
+
+**단계 5 — 가드 기반 Fuse 및 공동 제거.** `main + pin` 을 Fuse 한 뒤 `+ island` 를
+Fuse 하고(각각 쌍 가드 적용), 결과가 단일 솔리드인지 확인한 후 공동을 소거합니다.
 
 핀은 짧고 가늘며 거의 접촉한 부품 사이의 내부 클리어런스에 놓이므로, 외관 뷰와
 조인트 영역 밖의 단면에서는 보이지 않습니다.
@@ -697,7 +701,7 @@ concatBSplines=False)` 는 동일 평면/동일 원통 면과 공유 엣지를 �
    정밀 $\text{fuzzy}=0$ 결합 성공 직후 $O(N)$ 외곽 쉘 감사를 통해 `TopAbs_INTERNAL` 엣지와
    Parasolid 정밀도 미만 엣지($L < 10^{-5}\text{ mm}$)를 점검합니다. 나노미터급 NURBS-원통
    접선 중첩이나 조립 미세 오차로 이러한 결함이 발생한 경우에만 초정밀
-   $\text{fuzzy} \in \{5\times 10^{-5},\, 10^{-4}\}\text{ mm}$ 로 재시도하며, `BRepCheck`
+   $\text{fuzzy} = 5\times 10^{-5}\text{ mm}$ 또는 $10^{-4}\text{ mm}$ 로 재시도하며, `BRepCheck`
    유효성이 유지되고 결함 지표가 엄격히 감소할 때만 채택합니다.
 2. **비매니폴드 엣지·정점 힐링 (`_heal_non_manifold_topology`).**
    주기 곡면 분할 직전, 인접 면이 3개 이상인 비매니폴드 엣지와 인접 면 팬이 2개 이상으로
@@ -706,7 +710,7 @@ concatBSplines=False)` 는 동일 평면/동일 원통 면과 공유 엣지를 �
    내부 공동 제거 및 외향 정렬을 수행해 부피 변화 없이($<0.01\%$) 엄격한 2-매니폴드 경계를
    복원합니다.
 3. **정밀도 미만 엣지 정리 (`_collapse_sub_precision_edges`).**
-   3D 커브 STEP 정규화 후에도 $5\times 10^{-5}\text{ mm}$(Parasolid $10^{-5}\text{ mm}$ 의
+   3D 커브 STEP 정규화 후에도 $5\times 10^{-5}\text{ mm}$ (Parasolid $10^{-5}\text{ mm}$ 의
    5배 여유) 미만의 비퇴화 엣지가 남아 있으면 `ShapeFix_Wireframe.FixSmallEdges()`
    (`precision=5e-5`, `maxTolerance=1e-4`)로 엣지 공차 팽창 없이 정리합니다.
 
@@ -762,47 +766,54 @@ OCCT 의 음영 솔리드 탐색은 뷰어 편차에서 **단 하나의 면이�
 워터타이트·공동·부피·비매니폴드·최대 엣지 공차 가드 아래에서 세 가지 단계적 복구를 순서대로
 시도합니다.
 
-1. **점진적 정밀 슬리버 제거 (Step A).** `ShapeFix_FixSmallFace` 를
-   $(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ 순으로 보수적으로 적용하며,
-   미메싱 면이 실제로 줄어들고 최대 엣지 공차가 $\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$
-   이내로 유지될 때만 채택합니다.
-2. **정밀 곡선 엣지 중점 분할 (Step B).** 실패한 면에 대해서만 긴 곡선 엣지를 **정확히
-   중점 분할** (`_split_edge_exact_subedges`)합니다. 서브 엣지는 같은 3D 커브 위에
-   있으므로 기하 오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가
-   줄어듭니다. 반지름 $R$, 각도 $\theta$ 인 원호의 현 편차는
+**Step A — 점진적 정밀 슬리버 제거.** `ShapeFix_FixSmallFace` 를
+$(10^{-3},\, 5\times 10^{-3},\, 1.5\times 10^{-2})\text{ mm}$ 순으로 보수적으로 적용하며,
+미메싱 면이 실제로 줄어들고 최대 엣지 공차가 $\max(1.25\,\tau_{\max},\, 10^{-3}\text{ mm})$
+이내로 유지될 때만 채택합니다.
 
-   ```math
-   \delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
-   ```
+**Step B — 정밀 곡선 엣지 중점 분할.** 실패한 면에 대해서만 긴 곡선 엣지를 **정확히
+중점 분할** (`_split_edge_exact_subedges`)합니다. 서브 엣지는 같은 3D 커브 위에
+있으므로 기하 오차가 정확히 0이고, 뷰어 테셀레이션의 최대 현(chord) 새지타가
+줄어듭니다. 반지름 $R$, 각도 $\theta$ 인 원호의 현 편차는
 
-   이므로 $\theta$ 를 절반으로 줄이면 편차가 1/4 로 줄고, 면 수는 늘지 않습니다.
-3. **내접 핀치 와이어 홀 분할 (Step C).** 일부 CAD 모델의 평면에는 중심 거리 $d$, 반지름
-   $r$ 인 내부 원형 홀 와이어가 반지름 $R = d + r$ 인 외곽 경계 와이어와 단 한 점
-   $p_{\text{pinch}}$ 에서 정확히 내접(tangent pinch-point)하는 경우가 있습니다. Parasolid
-   기반 뷰어(eDrawings 등)는 이러한 내접 위상을 허용하지만, OCCT 의 `STEPControl_Reader`
-   는 STEP `UNCERTAINTY` 공차 내에서 접점 부근 엣지 끝점 파라미터를 미세하게 후퇴시키므로
-   외곽 와이어와 내부 와이어 사이에 서로 반대 방향의 미세 닫힘 선분이 겹치게 됩니다.
-   이로 인해 `BRepMesh_IncrementalMesh` 가 해당 면 전체에서
-   `IMeshData_SelfIntersectingWire | IMeshData_Failure`(삼각형 0개) 오류를 내며, CAD
-   Assistant 에서 해당 면이 사라지고 솔리드가 *Opened* 로 강등됩니다.
+```math
+\delta \approx R\left(1-\cos\frac{\theta}{2}\right) \approx \frac{R\,\theta^2}{8},
+```
 
-   `_split_tangent_pinch_wire_faces` 는 **기하 오차 0.0 mm** 로 이 문제를 자동 해결합니다.
-   - 실패한 평면에서 $\operatorname{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
-     인 내접 내부 와이어 $W_{\text{in}}$ 을 탐지(`BRepExtrema_DistShapeShape`)하고,
-     접점 $p_{\text{pinch}}$ 에 미병합 동위치 정점 쌍이 있으면 `ShapeBuild_ReShape`
-     (`TopAbs_FORWARD`)로 통합하여 8자형 보우타이 와이어 생성을 방지합니다.
-   - 홀 중심 $c$ 를 면 평면 $\Pi$ 에 투영한 뒤, $c$ 를 지나고 평면 내 접점 방향 벡터
-     $\mathbf{n}_{\text{cut}} = \operatorname{proj}_{\Pi}(p_{\text{pinch}} - c)$ 를 법선으로
-     하는 절단 평면(공통 접선과 평행)을 구성합니다.
-   - 절단 평면을 실패한 면과만 교차(`BRepAlgoAPI_Section`)한 뒤, 인접한 무관한 홀을 건드리지
-     않도록 $W_{\text{in}}$ 경계에 직접 닿는 국소 현(chord) 엣지
-     ($\min(\operatorname{dist}(v_1, W_{\text{in}}), \operatorname{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)만
-     선별해 `BRepFeat_SplitShape` 로 분할하고, `ShapeFix_Shape` 및 3D 커브 STEP 왕복 후
-     CAD Assistant 의 5개 Deflection 프로파일 전체를 재감사합니다.
+이므로 $\theta$ 를 절반으로 줄이면 편차가 1/4 로 줄고, 면 수는 늘지 않습니다.
 
-   내접 홀이 원래 평면 그대로 깔끔한 단일 외곽 와이어 초승달 서브 페이스들로 분리되어,
-   부피와 표면적을 100 % 동일하게 유지하면서도 CAD Assistant 에서 모든 면이 정상 Closed
-   Solid 및 단면 캡핑으로 렌더링됩니다.
+**Step C — 내접 핀치 와이어 홀 분할.** 일부 CAD 모델의 평면에는 중심 거리 $d$, 반지름
+$r$ 인 내부 원형 홀 와이어가 반지름 $R = d + r$ 인 외곽 경계 와이어와 단 한 점
+$p_{\text{pinch}}$ 에서 정확히 내접(tangent pinch-point)하는 경우가 있습니다. Parasolid
+기반 뷰어(eDrawings 등)는 이러한 내접 위상을 허용하지만, OCCT 의 `STEPControl_Reader`
+는 STEP `UNCERTAINTY` 공차 내에서 접점 부근 엣지 끝점 파라미터를 미세하게 후퇴시키므로
+외곽 와이어와 내부 와이어 사이에 서로 반대 방향의 미세 닫힘 선분이 겹치게 됩니다.
+이로 인해 `BRepMesh_IncrementalMesh` 가 해당 면 전체에서
+`IMeshData_SelfIntersectingWire | IMeshData_Failure`(삼각형 0개) 오류를 내며, CAD
+Assistant 에서 해당 면이 사라지고 솔리드가 *Opened* 로 강등됩니다.
+
+`_split_tangent_pinch_wire_faces` 는 **기하 오차 0.0 mm** 로 이 문제를 자동 해결합니다.
+
+- 실패한 평면에서 $\mathrm{dist}(W_{\text{in}}, W_{\text{out}}) < 10^{-2}\text{ mm}$
+  인 내접 내부 와이어 $W_{\text{in}}$ 을 탐지(`BRepExtrema_DistShapeShape`)하고,
+  접점 $p_{\text{pinch}}$ 에 미병합 동위치 정점 쌍이 있으면 `ShapeBuild_ReShape`
+  (`TopAbs_FORWARD`)로 통합하여 8자형 보우타이 와이어 생성을 방지합니다.
+- 홀 중심 $c$ 를 면 평면 $\Pi$ 에 투영한 뒤, $c$ 를 지나고 평면 내 접점 방향 벡터
+  $\mathbf{n}_{\text{cut}}$ 을 법선으로 하는 절단 평면(공통 접선과 평행)을 구성합니다.
+
+```math
+\mathbf{n}_{\text{cut}} = \mathrm{proj}_{\Pi}\!\left(p_{\text{pinch}} - c\right).
+```
+
+- 절단 평면을 실패한 면과만 교차(`BRepAlgoAPI_Section`)한 뒤, 인접한 무관한 홀을 건드리지
+  않도록 $W_{\text{in}}$ 경계에 직접 닿는 국소 현(chord) 엣지
+  ($\min(\mathrm{dist}(v_1, W_{\text{in}}), \mathrm{dist}(v_2, W_{\text{in}})) < 0.05\text{ mm}$)만
+  선별해 `BRepFeat_SplitShape` 로 분할하고, `ShapeFix_Shape` 및 3D 커브 STEP 왕복 후
+  CAD Assistant 의 5개 Deflection 프로파일 전체를 재감사합니다.
+
+내접 홀이 원래 평면 그대로 깔끔한 단일 외곽 와이어 초승달 서브 페이스들로 분리되어,
+부피와 표면적을 100 % 동일하게 유지하면서도 CAD Assistant 에서 모든 면이 정상 Closed
+Solid 및 단면 캡핑으로 렌더링됩니다.
 
 ### 5.5 최종 검증
 
