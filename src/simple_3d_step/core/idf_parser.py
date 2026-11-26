@@ -9,12 +9,26 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
-from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepBuilderAPI import (
+    BRepBuilderAPI_MakeEdge,
+    BRepBuilderAPI_MakeFace,
+    BRepBuilderAPI_MakeWire,
+    BRepBuilderAPI_Transform,
+)
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepGProp import BRepGProp
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
+from OCP.GC import GC_MakeArcOfCircle
+from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
+from OCP.GProp import GProp_GProps
+from OCP.ShapeFix import ShapeFix_Face, ShapeFix_Shape, ShapeFix_Wire
+from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
-from OCP.TopoDS import TopoDS_Shape
+from OCP.TopoDS import TopoDS_Shape, TopoDS_Wire
 
+from simple_3d_step.core.occt_compat import ShapeList
 from simple_3d_step.models import PcbSimplifiedPart, RGBColor
 
 
@@ -40,6 +54,10 @@ class IdfFootprint:
     xmax_mm: float
     ymax_mm: float
     is_mechanical: bool = False
+    is_circle: bool = False
+    circle_cx_mm: float = 0.0
+    circle_cy_mm: float = 0.0
+    circle_radius_mm: float = 0.0
 
     @property
     def width_mm(self) -> float:
@@ -48,6 +66,18 @@ class IdfFootprint:
     @property
     def depth_mm(self) -> float:
         return max(0.0, self.ymax_mm - self.ymin_mm)
+
+
+@dataclass
+class IdfDrilledHole:
+    """Single drilled hole record parsed from an IDF .DRILLED_HOLES section."""
+
+    diameter_mm: float
+    x_mm: float
+    y_mm: float
+    plating: str = "PTH"
+    associated_part: str = "BOARD"
+    hole_type: str = "PIN"
 
 
 @dataclass
@@ -79,6 +109,8 @@ class IdfBoardData:
     board_name: str = ""
     board_thickness_mm: float = 1.6
     board_bbox_xy: Optional[tuple[float, float, float, float]] = None  # (xmin, ymin, xmax, ymax)
+    board_outline_loops: dict[int, list[tuple[float, float, float]]] = field(default_factory=dict)
+    drilled_holes: list[IdfDrilledHole] = field(default_factory=list)
     placements: list[IdfPlacement] = field(default_factory=list)
     footprints: dict[tuple[str, str], IdfFootprint] = field(default_factory=dict)
     footprints_by_geom: dict[str, IdfFootprint] = field(default_factory=dict)
@@ -311,6 +343,21 @@ def parse_idf_ldf(ldf_path: str | Path) -> tuple[dict[tuple[str, str], IdfFootpr
         geom, pn, scale, height_mm, is_mech = cur_header
         bbox = _outline_points_to_bbox(cur_points, scale, outer_loop_only=False)
         if bbox is not None:
+            is_circle = False
+            ccx, ccy, crad = 0.0, 0.0, 0.0
+            if (
+                len(cur_points) == 2
+                and cur_points[0][0] == cur_points[1][0]
+                and abs(abs(cur_points[1][3]) - 360.0) < 1e-3
+            ):
+                ccx = cur_points[0][1] * scale
+                ccy = cur_points[0][2] * scale
+                crad = math.hypot(
+                    cur_points[1][1] * scale - ccx,
+                    cur_points[1][2] * scale - ccy,
+                )
+                if crad > 1e-4:
+                    is_circle = True
             fp = IdfFootprint(
                 geometry_name=geom,
                 part_number=pn,
@@ -320,6 +367,10 @@ def parse_idf_ldf(ldf_path: str | Path) -> tuple[dict[tuple[str, str], IdfFootpr
                 xmax_mm=bbox[2],
                 ymax_mm=bbox[3],
                 is_mechanical=is_mech,
+                is_circle=is_circle,
+                circle_cx_mm=ccx,
+                circle_cy_mm=ccy,
+                circle_radius_mm=crad,
             )
             by_pair[(geom.upper(), pn.upper())] = fp
             by_geom.setdefault(geom.upper(), fp)
@@ -414,6 +465,12 @@ def parse_idf_bdf(bdf_path: str | Path) -> IdfBoardData:
         if head == ".END_BOARD_OUTLINE":
             section = None
             continue
+        if head == ".DRILLED_HOLES":
+            section = ".DRILLED_HOLES"
+            continue
+        if head == ".END_DRILLED_HOLES":
+            section = None
+            continue
         if head == ".PLACEMENT":
             section = ".PLACEMENT"
             pending_placement = None
@@ -463,6 +520,35 @@ def parse_idf_bdf(bdf_path: str | Path) -> IdfBoardData:
                     if lid is not None and x is not None and y is not None and ang is not None:
                         outline_points.append((int(lid), x, y, ang))
 
+        elif section == ".DRILLED_HOLES":
+            if len(toks) >= 3:
+                dia = _try_float(toks[0])
+                hx = _try_float(toks[1])
+                hy = _try_float(toks[2])
+                if dia is not None and dia > 0.0 and hx is not None and hy is not None:
+                    if len(toks) >= 6:
+                        plating = toks[3].upper()
+                        assoc = toks[4]
+                        htype = toks[5].upper()
+                    elif len(toks) >= 4:
+                        plating = "PTH"
+                        assoc = toks[3]
+                        htype = "PIN"
+                    else:
+                        plating = "PTH"
+                        assoc = "BOARD"
+                        htype = "PIN"
+                    data.drilled_holes.append(
+                        IdfDrilledHole(
+                            diameter_mm=abs(dia) * board_scale,
+                            x_mm=hx * board_scale,
+                            y_mm=hy * board_scale,
+                            plating=plating,
+                            associated_part=assoc,
+                            hole_type=htype,
+                        )
+                    )
+
         elif section == ".PLACEMENT":
             if pending_placement is None:
                 if len(toks) >= 3:
@@ -477,6 +563,10 @@ def parse_idf_bdf(bdf_path: str | Path) -> IdfBoardData:
                     data.placements.append(placement)
 
     if outline_points:
+        for loop_id, ox, oy, oang in outline_points:
+            data.board_outline_loops.setdefault(loop_id, []).append(
+                (ox * board_scale, oy * board_scale, oang)
+            )
         data.board_bbox_xy = _outline_points_to_bbox(outline_points, board_scale, outer_loop_only=True)
     elif data.placements:
         xs = [p.x_mm for p in data.placements]
@@ -912,3 +1002,513 @@ def supplement_missing_idf_parts(
         )
 
     return added, matched_count, len(added), matched_names
+
+
+# ---------------------------------------------------------------------------
+# Standalone IDF-to-B-Rep Board & Component Builders (IDF-Only Mode)
+# ---------------------------------------------------------------------------
+
+def _count_solids(shape: TopoDS_Shape) -> int:
+    cnt = 0
+    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    while exp.More():
+        cnt += 1
+        exp.Next()
+    return cnt
+
+
+def _arc_midpoint_2d(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    included_deg: float,
+) -> Optional[tuple[float, float]]:
+    """Return a point midway along an IDF circular arc from (x0, y0) to (x1, y1)."""
+    chord = math.hypot(x1 - x0, y1 - y0)
+    if chord < 1e-7:
+        return None
+    rad = math.radians(included_deg)
+    sin_half = math.sin(abs(rad) * 0.5)
+    if sin_half < 1e-7:
+        return None
+    radius = chord / (2.0 * sin_half)
+    mx, my = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+    dx, dy = (x1 - x0) / chord, (y1 - y0) / chord
+    h = math.sqrt(max(0.0, radius * radius - (0.5 * chord) ** 2))
+    sign = 1.0 if included_deg > 0 else -1.0
+    if abs(included_deg) > 180.0:
+        sign = -sign
+    cx = mx - sign * dy * h
+    cy = my + sign * dx * h
+    a0 = math.atan2(y0 - cy, x0 - cx)
+    a_mid = a0 + 0.5 * rad
+    return (cx + radius * math.cos(a_mid), cy + radius * math.sin(a_mid))
+
+
+def _clean_idf_outline_loop(
+    pts: list[tuple[float, float, float]],
+) -> list[tuple[float, float, float]]:
+    """Remove Altium/ECAD IDF outline artifacts that cause wire self-intersections:
+    1. 180-degree backtracking hairline spikes between consecutive straight segments
+    2. Degenerate sub-10-micron straight micro-slivers
+    """
+    if len(pts) < 3:
+        return list(pts)
+    if abs(abs(pts[1][2]) - 360.0) < 1e-3:
+        return list(pts)
+
+    segs: list[list[float]] = []
+    for i in range(1, len(pts)):
+        x0, y0, _ = pts[i - 1]
+        x1, y1, ang = pts[i]
+        if math.hypot(x1 - x0, y1 - y0) < 1e-5:
+            continue
+        segs.append([x0, y0, x1, y1, ang])
+
+    if math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1]) > 1e-4:
+        segs.append([pts[-1][0], pts[-1][1], pts[0][0], pts[0][1], 0.0])
+
+    if len(segs) < 3:
+        return list(pts)
+
+    # 1. Collapse 180-degree backtracking spikes (and exact collinear reversals)
+    changed = True
+    while changed and len(segs) >= 3:
+        changed = False
+        n = len(segs)
+        for i in range(n):
+            a = segs[i]
+            b = segs[(i + 1) % n]
+            if abs(a[4]) <= 1e-3 and abs(b[4]) <= 1e-3:
+                v1x, v1y = a[2] - a[0], a[3] - a[1]
+                v2x, v2y = b[2] - b[0], b[3] - b[1]
+                l1, l2 = math.hypot(v1x, v1y), math.hypot(v2x, v2y)
+                if l1 > 1e-7 and l2 > 1e-7:
+                    cos_t = (v1x * v2x + v1y * v2y) / (l1 * l2)
+                    if cos_t < -0.95:
+                        merged = [a[0], a[1], b[2], b[3], 0.0]
+                        merged_len = math.hypot(merged[2] - merged[0], merged[3] - merged[1])
+                        if i + 1 < n:
+                            if merged_len >= 1e-5:
+                                segs[i : i + 2] = [merged]
+                            else:
+                                del segs[i : i + 2]
+                        else:
+                            if merged_len >= 1e-5:
+                                segs[0] = merged
+                                segs.pop()
+                            else:
+                                segs.pop()
+                                segs.pop(0)
+                        changed = True
+                        break
+
+    # 2. Collapse ultra-tiny straight micro-edges (< 0.01 mm) while preserving arc endpoints
+    changed = True
+    while changed and len(segs) >= 3:
+        changed = False
+        n = len(segs)
+        for i in range(n):
+            a = segs[i]
+            if abs(a[4]) <= 1e-3 and math.hypot(a[2] - a[0], a[3] - a[1]) < 0.01:
+                prev_s = segs[(i - 1) % n]
+                next_s = segs[(i + 1) % n]
+                if abs(prev_s[4]) > 1e-3 and abs(next_s[4]) <= 1e-3:
+                    next_s[0], next_s[1] = prev_s[2], prev_s[3]
+                else:
+                    prev_s[2], prev_s[3] = next_s[0], next_s[1]
+                segs.pop(i)
+                changed = True
+                break
+
+    if len(segs) < 2:
+        return list(pts)
+
+    cleaned: list[tuple[float, float, float]] = [(segs[0][0], segs[0][1], 0.0)]
+    for s in segs:
+        cleaned.append((s[2], s[3], s[4]))
+    return cleaned
+
+
+def _build_idf_wire_2d(
+    pts: list[tuple[float, float, float]],
+    z: float = 0.0,
+) -> Optional[TopoDS_Wire]:
+    """Convert an IDF 2D outline loop (in mm) into a closed OCCT TopoDS_Wire at elevation z."""
+    if len(pts) < 2:
+        return None
+
+    # Full-circle IDF encoding: 2 points where 2nd has |angle| == 360 (1st=center, 2nd=point on rim)
+    if abs(abs(pts[1][2]) - 360.0) < 1e-3:
+        cx, cy, _ = pts[0]
+        px, py, _ = pts[1]
+        r = math.hypot(px - cx, py - cy)
+        if r <= 1e-4:
+            return None
+        try:
+            circ = gp_Circ(gp_Ax2(gp_Pnt(cx, cy, z), gp_Dir(0.0, 0.0, 1.0)), r)
+            edge = BRepBuilderAPI_MakeEdge(circ).Edge()
+            wb = BRepBuilderAPI_MakeWire(edge)
+            if wb.IsDone():
+                return wb.Wire()
+        except Exception:
+            return None
+        return None
+
+    pts = _clean_idf_outline_loop(pts)
+
+    segments: list[tuple[float, float, float, float, float]] = []
+    for i in range(1, len(pts)):
+        x0, y0, _ = pts[i - 1]
+        x1, y1, ang = pts[i]
+        if math.hypot(x1 - x0, y1 - y0) < 1e-5:
+            continue
+        segments.append((x0, y0, x1, y1, ang))
+
+    # Close loop automatically if final point does not repeat starting vertex
+    if math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1]) > 1e-4:
+        segments.append((pts[-1][0], pts[-1][1], pts[0][0], pts[0][1], 0.0))
+
+    if len(segments) < 2:
+        return None
+
+    wb = BRepBuilderAPI_MakeWire()
+    added_edges = 0
+    for x0, y0, x1, y1, ang in segments:
+        p0 = gp_Pnt(x0, y0, z)
+        p1 = gp_Pnt(x1, y1, z)
+        edge = None
+        if 1e-3 < abs(ang) < 359.999:
+            mid = _arc_midpoint_2d(x0, y0, x1, y1, ang)
+            if mid is not None:
+                try:
+                    arc = GC_MakeArcOfCircle(p0, gp_Pnt(mid[0], mid[1], z), p1)
+                    if arc.IsDone():
+                        edge = BRepBuilderAPI_MakeEdge(arc.Value()).Edge()
+                except Exception:
+                    edge = None
+        if edge is None:
+            try:
+                mk = BRepBuilderAPI_MakeEdge(p0, p1)
+                if mk.IsDone():
+                    edge = mk.Edge()
+            except Exception:
+                edge = None
+        if edge is not None:
+            wb.Add(edge)
+            added_edges += 1
+
+    if added_edges < 2 or not wb.IsDone():
+        return None
+    return wb.Wire()
+
+
+def _extrude_idf_loop_to_solid(
+    pts: list[tuple[float, float, float]],
+    z_bottom: float,
+    height: float,
+) -> Optional[TopoDS_Shape]:
+    """Build a positively oriented watertight OCCT prism solid from a 2D IDF outline loop."""
+    wire = _build_idf_wire_2d(pts, z=z_bottom)
+    if wire is None:
+        return None
+    try:
+        face_mk = BRepBuilderAPI_MakeFace(wire, True)
+        if not face_mk.IsDone():
+            return None
+        face = face_mk.Face()
+        fixer = ShapeFix_Face(face)
+        fixer.Perform()
+        fixed_face = fixer.Face()
+        if not fixed_face.IsNull():
+            face = fixed_face
+
+        # If the wire still contains subtle self-intersections, repair it via ShapeFix_Wire
+        if not BRepCheck_Analyzer(face).IsValid():
+            try:
+                wfix = ShapeFix_Wire(wire, face, 1e-3)
+                wfix.ModifyTopologyMode = True
+                wfix.FixSelfIntersectionMode = True
+                wfix.FixSmallMode = True
+                wfix.FixConnected()
+                wfix.FixClosed()
+                wfix.Perform()
+                fw = wfix.Wire()
+                if not fw.IsNull():
+                    f2 = BRepBuilderAPI_MakeFace(fw, True)
+                    if f2.IsDone():
+                        sf2 = ShapeFix_Face(f2.Face())
+                        sf2.Perform()
+                        if not sf2.Face().IsNull() and BRepCheck_Analyzer(sf2.Face()).IsValid():
+                            face = sf2.Face()
+            except Exception:
+                pass
+
+        if not BRepCheck_Analyzer(face).IsValid():
+            return None
+
+        prism = BRepPrimAPI_MakePrism(face, gp_Vec(0.0, 0.0, height)).Shape()
+        if prism.IsNull() or _count_solids(prism) < 1:
+            return None
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(prism, props)
+        vol = float(props.Mass())
+        if abs(vol) <= 1e-6:
+            return None
+        if vol < 0.0:
+            prism = prism.Reversed()
+            sfix = ShapeFix_Shape(prism)
+            sfix.Perform()
+            if not sfix.Shape().IsNull():
+                prism = sfix.Shape()
+        if not BRepCheck_Analyzer(prism).IsValid():
+            return None
+        return prism
+    except Exception:
+        return None
+
+
+def _loop_bbox_xy(pts: list[tuple[float, float, float]]) -> Optional[tuple[float, float, float, float]]:
+    records = [(0, x, y, ang) for x, y, ang in pts]
+    return _outline_points_to_bbox(records, 1.0, outer_loop_only=False)
+
+
+def build_idf_board_shape(
+    idf: IdfBoardData,
+    *,
+    z_bottom: float = 0.0,
+    keep_board_holes: bool = True,
+    min_board_hole_mm: float = 0.8,
+) -> tuple[Optional[TopoDS_Shape], float, float, int, int]:
+    """Construct a watertight PCB substrate B-Rep solid directly from IDF board outline & drilled holes.
+
+    Returns ``(board_shape, z_bottom, z_top, kept_holes_count, skipped_holes_count)``.
+    """
+    thickness = idf.board_thickness_mm if idf.board_thickness_mm > 0.05 else 1.6
+    z_top = z_bottom + thickness
+
+    outer_loop_id: Optional[int] = None
+    board_solid: Optional[TopoDS_Shape] = None
+
+    if idf.board_outline_loops:
+        if 0 in idf.board_outline_loops:
+            outer_loop_id = 0
+        else:
+            best_area = -1.0
+            for lid, pts in idf.board_outline_loops.items():
+                bb = _loop_bbox_xy(pts)
+                if bb is not None:
+                    area = (bb[2] - bb[0]) * (bb[3] - bb[1])
+                    if area > best_area:
+                        best_area = area
+                        outer_loop_id = lid
+        if outer_loop_id is not None:
+            board_solid = _extrude_idf_loop_to_solid(
+                idf.board_outline_loops[outer_loop_id], z_bottom, thickness
+            )
+
+    if board_solid is None and idf.board_bbox_xy is not None:
+        x0, y0, x1, y1 = idf.board_bbox_xy
+        pad = 2.0 if not idf.board_outline_loops else 0.0
+        w = max(1.0, (x1 - x0) + 2.0 * pad)
+        d = max(1.0, (y1 - y0) + 2.0 * pad)
+        board_solid = BRepPrimAPI_MakeBox(gp_Pnt(x0 - pad, y0 - pad, z_bottom), w, d, thickness).Shape()
+
+    if board_solid is None:
+        return None, z_bottom, z_top, 0, 0
+
+    kept_holes = 0
+    skipped_holes = 0
+    cut_tools: list[TopoDS_Shape] = []
+    cut_z0 = z_bottom - 0.5
+    cut_h = thickness + 1.0
+    hole_thr = max(0.0, float(min_board_hole_mm))
+
+    # 1. Internal cutout loops in .BOARD_OUTLINE (loop_id != outer_loop_id)
+    for lid, pts in idf.board_outline_loops.items():
+        if lid == outer_loop_id:
+            continue
+        if not keep_board_holes:
+            skipped_holes += 1
+            continue
+        bb = _loop_bbox_xy(pts)
+        if bb is not None and hole_thr > 0.0:
+            cw = bb[2] - bb[0]
+            cd = bb[3] - bb[1]
+            if max(cw, cd) < hole_thr:
+                skipped_holes += 1
+                continue
+        cutout = _extrude_idf_loop_to_solid(pts, cut_z0, cut_h)
+        if cutout is not None:
+            cut_tools.append(cutout)
+            kept_holes += 1
+
+    # 2. Drilled holes from .DRILLED_HOLES
+    for hole in idf.drilled_holes:
+        if not keep_board_holes:
+            skipped_holes += 1
+            continue
+        if hole_thr > 0.0 and hole.diameter_mm < hole_thr:
+            skipped_holes += 1
+            continue
+        r = 0.5 * hole.diameter_mm
+        if r <= 0.02:
+            skipped_holes += 1
+            continue
+        try:
+            cyl = BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(hole.x_mm, hole.y_mm, cut_z0), gp_Dir(0.0, 0.0, 1.0)),
+                r,
+                cut_h,
+            ).Shape()
+            cut_tools.append(cyl)
+            kept_holes += 1
+        except Exception:
+            skipped_holes += 1
+
+    if cut_tools:
+        batch_ok = False
+        try:
+            cutter = BRepAlgoAPI_Cut()
+            cutter.SetRunParallel(True)
+            cutter.SetNonDestructive(True)
+            args = ShapeList()
+            args.Append(board_solid)
+            tools = ShapeList()
+            for t_sh in cut_tools:
+                tools.Append(t_sh)
+            cutter.SetArguments(args)
+            cutter.SetTools(tools)
+            cutter.Build()
+            if cutter.IsDone():
+                res = cutter.Shape()
+                if not res.IsNull() and _count_solids(res) >= 1 and BRepCheck_Analyzer(res).IsValid():
+                    board_solid = res
+                    batch_ok = True
+        except Exception:
+            batch_ok = False
+
+        if not batch_ok:
+            applied = 0
+            for t_sh in cut_tools:
+                try:
+                    c_one = BRepAlgoAPI_Cut(board_solid, t_sh)
+                    c_one.Build()
+                    if c_one.IsDone():
+                        res = c_one.Shape()
+                        if not res.IsNull() and _count_solids(res) >= 1 and BRepCheck_Analyzer(res).IsValid():
+                            board_solid = res
+                            applied += 1
+                except Exception:
+                    continue
+            skipped_holes += max(0, kept_holes - applied)
+            kept_holes = applied
+
+    return board_solid, z_bottom, z_top, kept_holes, skipped_holes
+
+
+def build_idf_cylinder_proto_and_trsf(
+    cx: float,
+    cy: float,
+    radius: float,
+    z_min: float,
+    z_max: float,
+) -> tuple[TopoDS_Shape, gp_Trsf]:
+    """Return canonical origin-centered cylinder prototype + rigid gp_Trsf for XCAF instancing."""
+    r = max(0.1, float(radius))
+    h = max(0.1, float(z_max - z_min))
+    proto = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), r, h
+    ).Shape()
+    trsf = gp_Trsf()
+    trsf.SetTranslation(gp_Vec(cx, cy, z_min))
+    return proto, trsf
+
+
+def build_idf_components(
+    idf: IdfBoardData,
+    alignment: IdfAlignment,
+    *,
+    default_color: Optional[RGBColor] = (0.35, 0.35, 0.38),
+    exclude_small_part_mm: float = 0.0,
+    detect_cylinders: bool = True,
+) -> tuple[list[PcbSimplifiedPart], int, int]:
+    """Generate standalone simplified 3D solids for all placed components in an IDF dataset.
+
+    Returns ``(parts, cylinder_count, excluded_small_count)``.
+    """
+    parts: list[PcbSimplifiedPart] = []
+    cylinder_count = 0
+    excluded_small_count = 0
+    exclude_thr = max(0.0, float(exclude_small_part_mm))
+    col_key = tuple(int(round(c * 255)) for c in default_color) if default_color is not None else None
+
+    for pl in idf.placements:
+        if not pl.is_placed:
+            continue
+        fp = idf.lookup_footprint(pl.package_name, pl.part_number)
+        if _is_zero_height_non_component(pl, fp):
+            continue
+
+        wx, wy, w, d, rot, z_min, z_max, _h = _compute_idf_world_footprint(pl, fp, alignment)
+        ph = max(0.1, z_max - z_min)
+        if exclude_thr > 0.0 and max(w, d, ph) <= exclude_thr + 1e-6:
+            excluded_small_count += 1
+            continue
+
+        ref = pl.ref_des.strip()
+        pkg = pl.package_name.strip()
+        comp_name = _format_idf_part_name(ref, pkg, fallback=f"IDF_Part_{len(parts) + 1}")
+
+        if detect_cylinders and fp is not None and fp.is_circle and fp.circle_radius_mm > 0.05:
+            r = fp.circle_radius_mm
+            proto_cyl, trsf = build_idf_cylinder_proto_and_trsf(wx, wy, r, z_min, z_max)
+            shape = proto_cyl.Located(TopLoc_Location(trsf))
+            proto_key = ("idf_cyl", round(r, 2), round(ph, 2), col_key)
+            cylinder_count += 1
+            parts.append(
+                PcbSimplifiedPart(
+                    name=comp_name,
+                    shape=shape,
+                    color=default_color,
+                    category="cylinder",
+                    ref_des=ref if ref.upper() != "NOREFDES" else "",
+                    leaf_name=pkg or "IDF_CYL",
+                    original_bodies=0,
+                    original_faces=0,
+                    simplified_faces=3,
+                    solid_count=1,
+                    proto_key=proto_key,
+                    proto_shape=proto_cyl,
+                    placement_trsf=trsf,
+                )
+            )
+            continue
+
+        pw, pd, prot = w, d, rot
+        if pd > pw:
+            pw, pd = pd, pw
+            prot = (prot + 90.0) % 360.0
+        proto_box, trsf = build_idf_box_proto_and_trsf(wx, wy, pw, pd, prot, z_min, z_max)
+        shape = proto_box.Located(TopLoc_Location(trsf))
+        proto_key = ("idf_box", round(pw, 2), round(pd, 2), round(ph, 2), col_key)
+        parts.append(
+            PcbSimplifiedPart(
+                name=comp_name,
+                shape=shape,
+                color=default_color,
+                category="idf_box",
+                ref_des=ref if ref.upper() != "NOREFDES" else "",
+                leaf_name=pkg or "IDF_BOX",
+                original_bodies=0,
+                original_faces=0,
+                simplified_faces=6,
+                solid_count=1,
+                proto_key=proto_key,
+                proto_shape=proto_box,
+                placement_trsf=trsf,
+            )
+        )
+
+    return parts, cylinder_count, excluded_small_count

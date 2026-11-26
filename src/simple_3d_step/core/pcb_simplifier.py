@@ -54,8 +54,11 @@ from OCP.TopoDS import TopoDS_Shape
 from scipy.spatial import ConvexHull
 
 from simple_3d_step.core.idf_parser import (
+    IdfAlignment,
     IdfBoardData,
     StepComponentFootprint,
+    build_idf_board_shape,
+    build_idf_components,
     supplement_missing_idf_parts,
 )
 from simple_3d_step.core.occt_compat import (
@@ -2512,6 +2515,149 @@ def simplify_pcb_assembly(
         removed_text_bodies=removed_text_total,
         original_bodies=orig_bodies,
         original_faces=orig_faces,
+        simplified_faces=simp_faces,
+        elapsed_seconds=elapsed,
+        logs=logs,
+    )
+
+
+def simplify_pcb_from_idf(
+    idf_data: IdfBoardData,
+    cfg: PcbSimplifyConfig,
+    *,
+    progress_cb: Optional[ProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> PcbSimplifyResult:
+    """Generate a simplified colored PCB STEP assembly purely from IDF (.bdf/.ldf) without a STEP file."""
+    ensure_occt_parallelism_enabled()
+    t0 = time.perf_counter()
+    logs: list[str] = []
+
+    if idf_data is None:
+        raise ValueError("IDF board data is required to generate an IDF-only PCB model.")
+
+    if cancel_check and cancel_check():
+        raise InterruptedError("Operation cancelled by user.")
+
+    if progress_cb:
+        progress_cb(0.10, "Building PCB board solid from IDF outline...")
+
+    output_parts: list[PcbSimplifiedPart] = []
+    board_count = 0
+
+    board_shape, z_bot, z_top, kept_holes, skipped_holes = build_idf_board_shape(
+        idf_data,
+        z_bottom=0.0,
+        keep_board_holes=cfg.keep_board_holes,
+        min_board_hole_mm=cfg.min_board_hole_mm,
+    )
+    if board_shape is not None:
+        board_color: Optional[RGBColor] = (
+            _ensure_min_brightness(_DEFAULT_BOARD_COLOR, cfg.min_color_brightness)
+            if cfg.preserve_colors
+            else None
+        )
+        board_faces = _count_subshapes(board_shape, TopAbs_FACE)
+        board_solids = max(1, _count_subshapes(board_shape, TopAbs_SOLID))
+        output_parts.append(
+            PcbSimplifiedPart(
+                name="PCB_Board",
+                shape=board_shape,
+                color=board_color,
+                category="board",
+                ref_des="PCB_Board",
+                leaf_name="",
+                original_bodies=0,
+                original_faces=0,
+                simplified_faces=board_faces,
+                solid_count=board_solids,
+            )
+        )
+        board_count = 1
+        hole_note = ""
+        if kept_holes or skipped_holes:
+            hole_note = f", {kept_holes} hole(s)/cutout(s) kept"
+            if skipped_holes:
+                hole_note += f", {skipped_holes} skipped"
+        logs.append(
+            f"Built PCB board from IDF ({idf_data.bdf_path.name if idf_data.bdf_path else 'IDF'}): "
+            f"thickness={z_top - z_bot:.2f} mm{hole_note}."
+        )
+
+    if cancel_check and cancel_check():
+        raise InterruptedError("Operation cancelled by user.")
+
+    if progress_cb:
+        progress_cb(0.45, "Generating PCB components from IDF placements...")
+
+    raw_idf_color: RGBColor = (
+        tuple(float(x) for x in cfg.idf_default_color[:3])  # type: ignore[assignment]
+        if len(cfg.idf_default_color) >= 3
+        else (0.35, 0.35, 0.38)
+    )
+    comp_color: Optional[RGBColor] = (
+        _ensure_min_brightness(raw_idf_color, cfg.min_color_brightness)
+        if cfg.preserve_colors
+        else None
+    )
+
+    alignment = IdfAlignment(
+        dx=0.0,
+        dy=0.0,
+        rot_deg=0.0,
+        board_z_bottom=z_bot,
+        board_z_top=z_top,
+    )
+    exclude_thr = max(0.0, float(cfg.exclude_small_part_mm))
+    comp_parts, cyl_count, excluded_small = build_idf_components(
+        idf_data,
+        alignment,
+        default_color=comp_color,
+        exclude_small_part_mm=exclude_thr,
+        detect_cylinders=cfg.detect_cylinders,
+    )
+    output_parts.extend(comp_parts)
+
+    if not output_parts:
+        raise ValueError("IDF file contains neither a valid board outline nor placed components.")
+
+    idf_box_count = len(comp_parts) - cyl_count
+    simp_faces = sum(p.simplified_faces for p in output_parts)
+    elapsed = time.perf_counter() - t0
+    if idf_data.ldf_path is None:
+        logs.append("Note: No IDF library file (.ldf/.pro/.emp) linked — using default component box sizes.")
+    logs.append(
+        f"Generated PCB from IDF-only: {board_count} board(s), "
+        f"{len(comp_parts)} component(s) ({cyl_count} cylinder(s), {idf_box_count} box(es))"
+        + (f", excluded {excluded_small} small part(s) <= {exclude_thr:g} mm" if excluded_small else "")
+        + f" | Total faces: {simp_faces:,} in {elapsed:.2f}s"
+    )
+
+    if progress_cb:
+        progress_cb(1.0, f"IDF-only PCB generation complete ({len(output_parts)} solids)")
+
+    root_name = (
+        (idf_data.board_name or "").strip()
+        or (idf_data.bdf_path.stem if idf_data.bdf_path else "PCB_IDF")
+    )
+    return PcbSimplifyResult(
+        parts=output_parts,
+        root_name=root_name,
+        unit="MM",
+        board_count=board_count,
+        heatsink_count=0,
+        component_count=0,
+        preserved_count=0,
+        hex_post_count=0,
+        cylinder_count=cyl_count,
+        fused_count=0,
+        box_count=0,
+        idf_matched_count=0,
+        idf_added_count=len(comp_parts),
+        excluded_small_count=excluded_small,
+        removed_text_bodies=0,
+        original_bodies=0,
+        original_faces=0,
         simplified_faces=simp_faces,
         elapsed_seconds=elapsed,
         logs=logs,

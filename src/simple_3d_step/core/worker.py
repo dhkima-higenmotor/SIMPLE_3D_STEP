@@ -87,7 +87,7 @@ def cad_worker_main(
     # Import heavy CAD modules only inside the worker process
     from simple_3d_step.core.idf_parser import load_idf_pair
     from simple_3d_step.core.occt_compat import configure_occt_parallelism
-    from simple_3d_step.core.pcb_simplifier import simplify_pcb_assembly
+    from simple_3d_step.core.pcb_simplifier import simplify_pcb_assembly, simplify_pcb_from_idf
     from simple_3d_step.core.solidifier import simplify_assembly_to_single_solid
     from simple_3d_step.core.step_io import (
         load_pcb_assembly,
@@ -277,35 +277,58 @@ def cad_worker_main(
                 )
 
             elif cmd_name == "pcb_simplify":
-                in_path = Path(payload["step_path"])
+                step_raw = payload.get("step_path")
+                in_path = Path(step_raw) if step_raw else None
                 out_path = Path(payload["output_path"])
                 bdf_raw = payload.get("bdf_path")
                 ldf_raw = payload.get("ldf_path")
                 pcb_cfg: PcbSimplifyConfig = payload.get("config") or PcbSimplifyConfig()
-                orig_size = in_path.stat().st_size if in_path.exists() else 0
+                idf_only = in_path is None
 
                 def _sub_prog(lo: float, hi: float):
                     def _cb(frac: float, text: str) -> None:
                         _progress(lo + (hi - lo) * max(0.0, min(1.0, float(frac))), text)
                     return _cb
 
-                pcb_asm = load_pcb_assembly(
-                    in_path,
-                    progress_cb=_sub_prog(0.00, 0.25),
-                    cancel_check=_is_cancelled,
-                )
-                idf_data = (
-                    load_idf_pair(bdf_raw, ldf_raw)
-                    if (pcb_cfg.use_idf_supplement and bdf_raw)
-                    else None
-                )
-                pcb_res = simplify_pcb_assembly(
-                    pcb_asm,
-                    pcb_cfg,
-                    idf_data=idf_data,
-                    progress_cb=_sub_prog(0.25, 0.85),
-                    cancel_check=_is_cancelled,
-                )
+                if in_path is not None:
+                    orig_size = in_path.stat().st_size if in_path.exists() else 0
+                    pcb_asm = load_pcb_assembly(
+                        in_path,
+                        progress_cb=_sub_prog(0.00, 0.25),
+                        cancel_check=_is_cancelled,
+                    )
+                    idf_data = (
+                        load_idf_pair(bdf_raw, ldf_raw)
+                        if (pcb_cfg.use_idf_supplement and bdf_raw)
+                        else None
+                    )
+                    pcb_res = simplify_pcb_assembly(
+                        pcb_asm,
+                        pcb_cfg,
+                        idf_data=idf_data,
+                        progress_cb=_sub_prog(0.25, 0.85),
+                        cancel_check=_is_cancelled,
+                    )
+                else:
+                    if not bdf_raw:
+                        raise ValueError(
+                            "Either a STEP file or an IDF board file (.bdf/.brd/.emn) is required."
+                        )
+                    bp = Path(bdf_raw)
+                    lp = Path(ldf_raw) if ldf_raw else None
+                    orig_size = (bp.stat().st_size if bp.exists() else 0) + (
+                        lp.stat().st_size if (lp is not None and lp.exists()) else 0
+                    )
+                    _progress(0.05, f"Reading IDF files: {bp.name}")
+                    idf_data = load_idf_pair(bp, lp)
+                    if idf_data is None:
+                        raise FileNotFoundError(f"IDF board file not found: {bp}")
+                    pcb_res = simplify_pcb_from_idf(
+                        idf_data,
+                        pcb_cfg,
+                        progress_cb=_sub_prog(0.15, 0.85),
+                        cancel_check=_is_cancelled,
+                    )
                 if _is_cancelled():
                     raise InterruptedError("Operation cancelled by user.")
 
@@ -327,6 +350,7 @@ def cad_worker_main(
                             "pcb_simplify",
                             {
                                 "output_path": str(saved),
+                                "idf_only": idf_only,
                                 "orig_size_bytes": orig_size,
                                 "size_bytes": saved.stat().st_size,
                                 "board_count": pcb_res.board_count,

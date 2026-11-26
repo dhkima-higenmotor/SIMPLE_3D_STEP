@@ -48,7 +48,7 @@
 
 ![PCB Mode 화면: 다중 Altium PCB STEP + IDF 대기열과 토글형 우측 PCB Parameters 패널](docs/screenshots/gui_pcb_mode.png)
 
-Altium Designer에서 출력된 복잡한 PCB 어셈블리 경량화에 특화된 탭입니다. `.step` / `.stp` 파일을 추가하면 동일 폴더의 `.bdf`/`.ldf`(또는 `.brd`/`.pro`, `.emn`/`.emp`) IDF 파일을 자동 연결하며, **[Attach IDF...]** 버튼이나 행 우클릭 메뉴로 수동 연결·해제도 가능합니다. 우측 상단 **[Parameters]** 버튼(Single Mode와 동일한 토글 방식, 기본 숨김)을 열어 **Delete Board Holes < (mm)**, **Exclude Parts ≤ (mm)**, **Min Color Brightness** 값을 조정하고 `config.json`에 저장할 수 있습니다. **[RUN]** 실행 시 병렬 처리 후 원본 폴더에 `<파일명>_pcb_simplified.step`으로 저장되며, **완료된 행을 더블클릭**하면 외부 3D 뷰어로 즉시 열립니다.
+Altium Designer에서 출력된 복잡한 PCB 어셈블리 경량화에 특화된 탭입니다. `.step` / `.stp` 파일을 추가하면 동일 폴더의 `.bdf`/`.ldf`(또는 `.brd`/`.pro`, `.emn`/`.emp`) IDF 파일을 자동 연결하며, **[Add IDF...]** 버튼(STEP 파일이 없어도 항상 활성화)으로 STEP 없이 IDF 파일만으로 PCB 모델을 생성하거나 STEP 행에 수동 연결할 수 있습니다. 우측 상단 **[Parameters]** 버튼(Single Mode와 동일한 토글 방식, 기본 숨김)을 열어 **Delete Board Holes < (mm)**, **Exclude Parts ≤ (mm)**, **Min Color Brightness** 값을 조정하고 `config.json`에 저장할 수 있습니다. **[RUN]** 실행 시 STEP 및 IDF 단독 항목을 병렬 처리해 원본 폴더에 `<파일명>_pcb_simplified.step`으로 저장하며, **완료된 행을 더블클릭**하면 외부 3D 뷰어로 즉시 열립니다.
 
 ---
 
@@ -185,7 +185,7 @@ GUI 상단의 탭으로 언제든 세 가지 모드를 전환할 수 있습니�
 
 **PCB Mode** — Altium Designer PCB STEP + IDF 다중 파일 병렬 경량화 대기열:
 
-- **[Add STEP Files...]** (`Ctrl+O`)로 여러 PCB `.step` / `.stp` 파일을 추가하면 같은 폴더의 동명 `.bdf` / `.ldf`(및 보조 `.brd`/`.pro`, `.emn`/`.emp`) IDF 파일이 자동 연결됩니다. **[Attach IDF...]** 버튼이나 행 우클릭 메뉴로 수동 연결·해제도 가능합니다.
+- **[Add STEP Files...]** (`Ctrl+O`)로 여러 PCB `.step` / `.stp` 파일을 추가하면 같은 폴더의 동명 `.bdf` / `.ldf`(및 보조 `.brd`/`.pro`, `.emn`/`.emp`) IDF 파일이 자동 연결됩니다. **[Add IDF...]** 버튼으로 STEP 파일 없이 IDF 단독 모델을 추가하거나 STEP 행에 IDF를 연결할 수 있으며, 행 우클릭 메뉴로 수동 변경·해제도 가능합니다.
 - 우측 상단 **[Parameters]** 토글 버튼으로 **PCB Parameters** 패널을 열고 `Delete Board Holes < (mm)`, `Exclude Parts ≤ (mm)`, `Min Color Brightness`를 설정·저장할 수 있습니다.
 - **[RUN]** (`F5`) 실행 시 병렬 처리 후 각 원본과 같은 폴더에 `<파일명>_pcb_simplified.step`으로 저장되며, 완료된 행을 더블클릭하면 외부 3D 뷰어로 열립니다.
 - 작업 중 다른 탭을 보고 있어도 탭 라벨에 실시간 진행률(`● Batch Mode (2/5)`, `● PCB Mode (1/2)`)이 표시됩니다.

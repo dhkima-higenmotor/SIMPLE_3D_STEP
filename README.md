@@ -48,7 +48,7 @@ Every queued file shows its status (`Pending` / `Running` / `Done` / `Failed` / 
 
 ![PCB Mode GUI: multi-file Altium PCB STEP + IDF queue with collapsible PCB Parameters drawer](docs/screenshots/gui_pcb_mode.png)
 
-Designed specifically for complex PCB assemblies exported from Altium Designer. Adding `.step` / `.stp` files automatically detects matching `.bdf`/`.ldf` (or `.brd`/`.pro`, `.emn`/`.emp`) IDF files in the same folder, or you can manually attach/clear IDF pairs via **[Attach IDF...]** or the right-click context menu. Toggle **[Parameters]** (top-right, hidden by default just like Single Mode) to adjust **Delete Board Holes < (mm)**, **Exclude Parts ≤ (mm)**, and **Min Color Brightness**, and save them to `config.json`. Pressing **[RUN]** processes the queued PCB files in parallel, writing `<name>_pcb_simplified.step` next to each source file; **double-click a completed row** to open it in your 3D viewer.
+Designed specifically for complex PCB assemblies exported from Altium Designer. Adding `.step` / `.stp` files automatically detects matching `.bdf`/`.ldf` (or `.brd`/`.pro`, `.emn`/`.emp`) IDF files in the same folder, or you can use **[Add IDF...]** (always enabled, even with no STEP file registered) to add standalone IDF-only PCB jobs or manually attach IDF pairs to a STEP row. Toggle **[Parameters]** (top-right, hidden by default just like Single Mode) to adjust **Delete Board Holes < (mm)**, **Exclude Parts ≤ (mm)**, and **Min Color Brightness**, and save them to `config.json`. Pressing **[RUN]** processes the queued PCB STEP and/or IDF-only files in parallel, writing `<name>_pcb_simplified.step` next to each source file; **double-click a completed row** to open it in your 3D viewer.
 
 ---
 
@@ -185,7 +185,7 @@ The GUI has three tabs, switchable at any time from the top of the window (see t
 
 **PCB Mode** — a multi-file parallel queue tailored for Altium Designer PCB STEP + IDF files:
 
-- **[Add STEP Files...]** (`Ctrl+O`) queues multiple PCB `.step` / `.stp` files and automatically links sibling `.bdf` / `.ldf` (plus `.brd`/`.pro`, `.emn`/`.emp`) IDF files when present. Use **[Attach IDF...]** or right-click a row to attach or clear IDF files manually.
+- **[Add STEP Files...]** (`Ctrl+O`) queues multiple PCB `.step` / `.stp` files and automatically links sibling `.bdf` / `.ldf` (plus `.brd`/`.pro`, `.emn`/`.emp`) IDF files when present. Use **[Add IDF...]** to queue standalone IDF-only PCB models (without a STEP file) or attach IDF files to an unlinked STEP row, or right-click a row to attach/change/clear IDF files manually.
 - Toggle **[Parameters]** (top-right) to show or hide the right-hand **PCB Parameters** panel (`Delete Board Holes < (mm)`, `Exclude Parts ≤ (mm)`, `Min Color Brightness`, and **Save to config.json**).
 - Press **[RUN]** (`F5`) to process the selected rows (or all queued files) in parallel; each output is saved next to its source as `<name>_pcb_simplified.step`. Double-click a completed row to open it in the configured external 3D viewer.
 - Tab labels show live progress (`● Batch Mode (2/5)`, `● PCB Mode (1/2)`) even while working in another tab; each mode uses its own independent background CAD worker pool.

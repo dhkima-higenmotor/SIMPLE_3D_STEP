@@ -387,3 +387,120 @@ def test_open_and_save_dirs_survive_app_close_and_relaunch(
         assert Path(captured["save_single"]).resolve() == save_dir.resolve()
     finally:
         app2._on_close()
+
+
+def test_add_idf_button_label_enabled_without_step_and_idf_only_run(
+    pcb_panel: PcbPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify:
+    1. Button is named 'Add IDF...' and stays enabled even with no STEP files registered.
+    2. Clicking 'Add IDF...' without STEP files queues an IDF-only job and auto-links sibling .ldf.
+    3. Pressing RUN on an IDF-only job generates <stem>_pcb_simplified.step (even if pcb_use_idf_supplement=False).
+    4. Double-clicking the completed IDF-only row opens the generated simplified STEP.
+    """
+    from simple_3d_step.config import save_config
+    from simple_3d_step.core.step_io import load_pcb_assembly
+
+    # 1. Empty queue: button label is 'Add IDF...' and state is enabled (normal)
+    assert pcb_panel._btn_attach_idf.cget("text") == "Add IDF..."
+    assert str(pcb_panel._btn_attach_idf.cget("state")) == tk.NORMAL
+    assert str(pcb_panel._btn_run.cget("state")) == tk.DISABLED
+
+    # Generate sample IDF files only (remove STEP so only .bdf/.ldf exist)
+    step_path, bdf_path, ldf_path = generate_sample_pcb_step_and_idf(tmp_path, stem="pure_idf")
+    step_path.unlink()
+
+    # Disable pcb_use_idf_supplement in config.json to prove IDF-only still runs unconditionally
+    pcb_panel._config.pcb_use_idf_supplement = False
+    save_config(pcb_panel._config, pcb_panel._config_path)
+
+    # 2. Simulate user clicking [Add IDF...] and picking only pure_idf.bdf (auto-pairs pure_idf.ldf)
+    monkeypatch.setattr(
+        "simple_3d_step.gui.pcb_panel.filedialog.askopenfilenames",
+        lambda **_kw: (str(bdf_path),),
+    )
+    pcb_panel.add_idf_dialog()
+
+    assert len(pcb_panel._items) == 1
+    item = pcb_panel._items[0]
+    assert item.is_idf_only is True
+    assert item.path is None
+    assert item.bdf_path == bdf_path.resolve()
+    assert item.ldf_path == ldf_path.resolve()
+    assert item.idf_label == "IDF Only (bdf+ldf)"
+    assert str(pcb_panel._btn_run.cget("state")) == tk.NORMAL
+
+    # 3. RUN generates pure_idf_pcb_simplified.step via background CAD worker
+    pcb_panel.run()
+    deadline = time.monotonic() + 30.0
+    while pcb_panel.running and time.monotonic() < deadline:
+        pcb_panel.update()
+        time.sleep(0.05)
+
+    assert not pcb_panel.running
+    assert item.status == ST_DONE
+    out_file = item.output_path
+    assert out_file is not None and out_file.is_file()
+    assert out_file.name == "pure_idf_pcb_simplified.step"
+
+    # Reload generated STEP and verify board + IDF components are present
+    reloaded = load_pcb_assembly(out_file)
+    assert len(reloaded.components) >= 7  # PCB_Board + U1, J1, C1, C2, R1, U2, R2 (M1 hole skipped)
+    assert any(c.name == "PCB_Board" for c in reloaded.components)
+
+    # 4. Double-click opens generated simplified STEP in external viewer
+    opened: list[Path] = []
+    monkeypatch.setattr(
+        "simple_3d_step.gui.pcb_panel.launch_external_viewer",
+        lambda p, _cfg: (opened.append(Path(p)), "Launched")[1],
+    )
+    pcb_panel.update()
+    bbox = pcb_panel._tree.bbox("0")
+    assert bbox
+    pcb_panel._on_tree_double_click(SimpleNamespace(y=bbox[1] + bbox[3] // 2))
+    assert opened == [out_file]
+
+
+def test_add_idf_dialog_attaches_to_unlinked_step_or_adds_new_idf_only(
+    pcb_panel: PcbPanel, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify Add IDF behavior when STEP rows already exist:
+    - Selected unlinked STEP row -> attaches IDF to that STEP row
+    - Selected STEP row that already has IDF -> adds new IDF-only row without overwriting
+    """
+    step_a = tmp_path / "board_a.step"
+    bdf_a = tmp_path / "custom_a.bdf"
+    ldf_a = tmp_path / "custom_a.ldf"
+    bdf_standalone = tmp_path / "standalone.bdf"
+    ldf_standalone = tmp_path / "standalone.ldf"
+    for p in (step_a, bdf_a, ldf_a, bdf_standalone, ldf_standalone):
+        p.write_text("dummy", encoding="utf-8")
+
+    # Queue unlinked STEP row (auto-selected)
+    pcb_panel.queue_files([step_a])
+    assert len(pcb_panel._items) == 1
+    assert pcb_panel._items[0].bdf_path is None
+
+    # Add IDF while unlinked STEP row is selected -> attaches to row 0
+    monkeypatch.setattr(
+        "simple_3d_step.gui.pcb_panel.filedialog.askopenfilenames",
+        lambda **_kw: (str(bdf_a),),
+    )
+    pcb_panel.add_idf_dialog()
+    assert len(pcb_panel._items) == 1
+    assert pcb_panel._items[0].bdf_path == bdf_a.resolve()
+    assert pcb_panel._items[0].ldf_path == ldf_a.resolve()
+    assert pcb_panel._items[0].idf_label == "Manual (bdf+ldf)"
+
+    # Add IDF again while row 0 ALREADY has an IDF -> queues standalone.bdf as a new IDF-only row
+    monkeypatch.setattr(
+        "simple_3d_step.gui.pcb_panel.filedialog.askopenfilenames",
+        lambda **_kw: (str(bdf_standalone),),
+    )
+    pcb_panel.add_idf_dialog()
+    assert len(pcb_panel._items) == 2
+    assert pcb_panel._items[0].bdf_path == bdf_a.resolve()
+    assert pcb_panel._items[1].is_idf_only is True
+    assert pcb_panel._items[1].bdf_path == bdf_standalone.resolve()
+    assert pcb_panel._items[1].ldf_path == ldf_standalone.resolve()
+    assert pcb_panel._items[1].idf_label == "IDF Only (bdf+ldf)"

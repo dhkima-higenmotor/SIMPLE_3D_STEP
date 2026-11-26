@@ -92,14 +92,33 @@ def build_pcb_simplify_config(cfg: AppConfig) -> PcbSimplifyConfig:
 
 @dataclass
 class PcbBatchItem:
-    """One queued PCB STEP file, its optional paired IDF (.bdf/.ldf), and processing state."""
+    """One queued PCB STEP file (or standalone IDF board file), paired IDF (.bdf/.ldf), and state."""
 
-    path: Path
+    path: Optional[Path] = None
     bdf_path: Optional[Path] = None
     ldf_path: Optional[Path] = None
-    idf_source: str = "none"  # "auto" | "manual" | "none"
+    idf_source: str = "none"  # "auto" | "manual" | "only" | "none"
     status: str = ST_PENDING
     output_path: Optional[Path] = None
+
+    @property
+    def is_idf_only(self) -> bool:
+        return self.path is None and self.bdf_path is not None
+
+    @property
+    def source_path(self) -> Path:
+        if self.path is not None:
+            return self.path
+        assert self.bdf_path is not None
+        return self.bdf_path
+
+    @property
+    def display_name(self) -> str:
+        if self.path is not None:
+            return self.path.name
+        if self.bdf_path is not None:
+            return self.bdf_path.name
+        return "(Unknown)"
 
     @property
     def idf_label(self) -> str:
@@ -111,6 +130,8 @@ class PcbBatchItem:
             pair = f"{b_ext}+{l_ext}"
         else:
             pair = f"{b_ext} only"
+        if self.is_idf_only or self.idf_source == "only":
+            return f"IDF Only ({pair})"
         prefix = "Manual" if self.idf_source == "manual" else "Auto"
         return f"{prefix} ({pair})"
 
@@ -177,10 +198,11 @@ class PcbPanel(tk.Frame):
             self.queue_files([Path(p) for p in initial_files])
 
         self._log_panel.set_progress(
-            0.0, "Ready — add Altium PCB STEP files (matching .bdf/.ldf auto-detected) and press RUN."
+            0.0,
+            "Ready — add Altium PCB STEP or IDF (.bdf/.ldf) files and press RUN.",
         )
         self._log_panel.append_log(
-            "PCB mode: per-component 1-solid simplification with color preservation and optional IDF (.bdf/.ldf) supplementation."
+            "PCB mode: per-component 1-solid simplification with color preservation, IDF supplementation, and standalone IDF-only STEP generation."
         )
 
     # ------------------------------------------------------------------
@@ -227,7 +249,7 @@ class PcbPanel(tk.Frame):
         )
         self._tb_params.pack(side=tk.RIGHT, padx=(8, 0))
 
-        self._summary_var = tk.StringVar(value="No PCB STEP files queued.")
+        self._summary_var = tk.StringVar(value="No PCB files queued.")
         tk.Label(
             title_row,
             textvariable=self._summary_var,
@@ -239,8 +261,8 @@ class PcbPanel(tk.Frame):
         tk.Label(
             header,
             text=(
-                "Add PCB .step / .stp files and press [RUN] — simplifies each component into 1 colored solid (<name>_pcb_simplified.step).\n"
-                "Sibling .bdf/.ldf IDF files are auto-linked to add missing parts as boxes (or use [Attach IDF...]). Double-click a completed row to view."
+                "Add PCB .step / .stp files or IDF (.bdf/.ldf) files and press [RUN] — generates <name>_pcb_simplified.step.\n"
+                "Sibling .bdf/.ldf IDF files auto-link to STEP files, or use [Add IDF...] for IDF-only models or manual linking. Double-click a completed row to view."
             ),
             background=COLORS["surface"],
             foreground=COLORS["text_secondary"],
@@ -262,11 +284,12 @@ class PcbPanel(tk.Frame):
 
         self._btn_attach_idf = ttk.Button(
             self._toolbar,
-            text="Attach IDF...",
+            text="Add IDF...",
             style="Toolbar.TButton",
-            command=self.attach_idf_dialog,
+            command=self.add_idf_dialog,
         )
         self._btn_attach_idf.pack(side=tk.LEFT, padx=(0, 4))
+        self._btn_add_idf = self._btn_attach_idf
 
         self._btn_remove = ttk.Button(
             self._toolbar,
@@ -345,7 +368,9 @@ class PcbPanel(tk.Frame):
         self._main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         self._main_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(5, 3))
 
-        self._files_box = ttk.LabelFrame(self._main_pane, text="Queued PCB STEP Files", padding=(6, 4))
+        self._files_box = ttk.LabelFrame(
+            self._main_pane, text="Queued PCB STEP / IDF Files", padding=(6, 4)
+        )
         self._params_panel = self._build_params_panel(self._main_pane)
 
         # Show only the file queue by default; right-hand PCB Parameters card toggles via [Parameters]
@@ -353,8 +378,8 @@ class PcbPanel(tk.Frame):
 
         columns = ("name", "idf", "folder", "status", "output")
         headings = {
-            "name": ("STEP File", 160, False),
-            "idf": ("IDF (.bdf/.ldf)", 115, False),
+            "name": ("STEP / IDF File", 160, False),
+            "idf": ("IDF (.bdf/.ldf)", 125, False),
             "folder": ("Source Folder", 230, True),
             "status": ("Status", 75, False),
             "output": ("Output File", 175, True),
@@ -393,7 +418,10 @@ class PcbPanel(tk.Frame):
 
         # Context menu for convenient IDF linking / viewer actions
         self._ctx_menu = tk.Menu(self, tearoff=0)
-        self._ctx_menu.add_command(label="Attach IDF (.bdf/.ldf)...", command=self.attach_idf_dialog)
+        self._ctx_menu.add_command(
+            label="Attach / Change IDF (.bdf/.ldf)...",
+            command=lambda: self.attach_idf_dialog(force_attach=True),
+        )
         self._ctx_menu.add_command(label="Clear IDF Attachment", command=self._clear_selected_idf)
         self._ctx_menu.add_separator()
         self._ctx_menu.add_command(label="Open Original STEP", command=self._open_selected_original)
@@ -618,9 +646,9 @@ class PcbPanel(tk.Frame):
             tk.END,
             iid=str(idx),
             values=(
-                item.path.name,
+                item.display_name,
                 item.idf_label,
-                str(item.path.parent),
+                str(item.source_path.parent),
                 item.status,
                 item.output_path.name if item.output_path else "",
             ),
@@ -635,7 +663,7 @@ class PcbPanel(tk.Frame):
             iids = [str(i) for i in selected if 0 <= i < len(self._items)]
             if iids:
                 self._tree.selection_set(iids)
-        self._files_box.configure(text=f"Queued PCB STEP Files — {len(self._items)}")
+        self._files_box.configure(text=f"Queued PCB STEP / IDF Files — {len(self._items)}")
         self._update_summary()
 
     def _update_row(self, idx: int) -> None:
@@ -647,9 +675,9 @@ class PcbPanel(tk.Frame):
             self._tree.item(
                 iid,
                 values=(
-                    item.path.name,
+                    item.display_name,
                     item.idf_label,
-                    str(item.path.parent),
+                    str(item.source_path.parent),
                     item.status,
                     item.output_path.name if item.output_path else "",
                 ),
@@ -659,13 +687,16 @@ class PcbPanel(tk.Frame):
 
     def _update_summary(self) -> None:
         if not self._items:
-            self._summary_var.set("No PCB STEP files queued.")
+            self._summary_var.set("No PCB files queued.")
             return
         done = sum(1 for it in self._items if it.status == ST_DONE)
         failed = sum(1 for it in self._items if it.status == ST_FAILED)
         pending = sum(1 for it in self._items if it.status == ST_PENDING)
-        with_idf = sum(1 for it in self._items if it.bdf_path is not None)
+        idf_only = sum(1 for it in self._items if it.is_idf_only)
+        with_idf = sum(1 for it in self._items if not it.is_idf_only and it.bdf_path is not None)
         bits = [f"{len(self._items)} queued"]
+        if idf_only:
+            bits.append(f"{idf_only} IDF-only")
         if with_idf:
             bits.append(f"{with_idf} with IDF")
         if done:
@@ -680,7 +711,7 @@ class PcbPanel(tk.Frame):
         idle = not self._running
         has_items = bool(self._items)
         self._btn_add.configure(state=tk.NORMAL if idle else tk.DISABLED)
-        self._btn_attach_idf.configure(state=tk.NORMAL if idle and has_items else tk.DISABLED)
+        self._btn_attach_idf.configure(state=tk.NORMAL if idle else tk.DISABLED)
         self._btn_remove.configure(state=tk.NORMAL if idle and has_items else tk.DISABLED)
         self._btn_clear.configure(state=tk.NORMAL if idle and has_items else tk.DISABLED)
         self._btn_reload.configure(state=tk.NORMAL if idle else tk.DISABLED)
@@ -778,14 +809,67 @@ class PcbPanel(tk.Frame):
     # Queue & IDF Attachment Management
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_sibling_ldf(bdf_path: Path) -> Optional[Path]:
+        """Auto-discover a matching IDF library file (.ldf/.pro/.emp) next to a board file."""
+        for b_ext, l_ext in IDF_EXT_PAIRS:
+            if bdf_path.suffix.lower() == b_ext:
+                cand = bdf_path.with_suffix(l_ext)
+                if cand.is_file():
+                    return cand.resolve()
+                try:
+                    for sib in bdf_path.parent.iterdir():
+                        if (
+                            sib.is_file()
+                            and sib.stem.lower() == bdf_path.stem.lower()
+                            and sib.suffix.lower() == l_ext
+                        ):
+                            return sib.resolve()
+                except OSError:
+                    pass
+                break
+        return None
+
+    @staticmethod
+    def _resolve_sibling_bdf(ldf_path: Path) -> Optional[Path]:
+        """Auto-discover a matching IDF board file (.bdf/.brd/.emn) next to a library file."""
+        for b_ext, l_ext in IDF_EXT_PAIRS:
+            if ldf_path.suffix.lower() == l_ext:
+                cand = ldf_path.with_suffix(b_ext)
+                if cand.is_file():
+                    return cand.resolve()
+                try:
+                    for sib in ldf_path.parent.iterdir():
+                        if (
+                            sib.is_file()
+                            and sib.stem.lower() == ldf_path.stem.lower()
+                            and sib.suffix.lower() == b_ext
+                        ):
+                            return sib.resolve()
+                except OSError:
+                    pass
+                break
+        return None
+
     def queue_files(self, paths: Iterable[Path]) -> None:
-        """Append PCB STEP files and auto-detect sibling IDF (.bdf/.ldf) pairs."""
+        """Append PCB STEP files (auto-linking sibling IDF) and/or standalone IDF files."""
         if self._running:
             return
 
-        known = {os.path.normcase(str(item.path)) for item in self._items}
-        added = 0
-        idf_linked = 0
+        known_steps = {
+            os.path.normcase(str(item.path))
+            for item in self._items
+            if item.path is not None
+        }
+        known_idf_only = {
+            os.path.normcase(str(item.bdf_path))
+            for item in self._items
+            if item.is_idf_only and item.bdf_path is not None
+        }
+
+        step_paths: list[Path] = []
+        idf_board_paths: list[Path] = []
+        idf_lib_paths: list[Path] = []
         ignored = 0
 
         for raw in paths:
@@ -794,18 +878,35 @@ class PcbPanel(tk.Frame):
             except OSError:
                 ignored += 1
                 continue
-            if not path.is_file() or path.suffix.lower() not in STEP_SUFFIXES:
+            if not path.is_file():
                 ignored += 1
                 continue
+            ext = path.suffix.lower()
+            if ext in STEP_SUFFIXES:
+                step_paths.append(path)
+            elif ext in IDF_BOARD_EXTS:
+                idf_board_paths.append(path)
+            elif ext in IDF_LIB_EXTS:
+                idf_lib_paths.append(path)
+            else:
+                ignored += 1
+
+        added_step = 0
+        added_idf_only = 0
+        idf_linked = 0
+        linked_bdfs_this_call: set[str] = set()
+
+        for path in step_paths:
             key = os.path.normcase(str(path))
-            if key in known:
+            if key in known_steps:
                 ignored += 1
                 continue
-            known.add(key)
+            known_steps.add(key)
             bdf, ldf = find_matching_idf_files(path)
             idf_src = "auto" if bdf is not None else "none"
             if bdf is not None:
                 idf_linked += 1
+                linked_bdfs_this_call.add(os.path.normcase(str(bdf)))
             self._items.append(
                 PcbBatchItem(
                     path=path,
@@ -814,23 +915,146 @@ class PcbPanel(tk.Frame):
                     idf_source=idf_src,
                 )
             )
+            added_step += 1
+
+        # Group standalone IDF inputs (excluding any .bdf already auto-linked to a STEP file above)
+        lib_by_stem: dict[tuple[str, str], Path] = {
+            (os.path.normcase(str(lp.parent)), lp.stem.lower()): lp
+            for lp in idf_lib_paths
+        }
+        standalone_pairs: list[tuple[Path, Optional[Path]]] = []
+        seen_bdfs: set[str] = set()
+        for bp in idf_board_paths:
+            bkey = os.path.normcase(str(bp))
+            if bkey in linked_bdfs_this_call or bkey in seen_bdfs:
+                continue
+            seen_bdfs.add(bkey)
+            lp = lib_by_stem.get((os.path.normcase(str(bp.parent)), bp.stem.lower()))
+            if lp is None:
+                lp = self._resolve_sibling_ldf(bp)
+            standalone_pairs.append((bp, lp))
+
+        # If only library files were passed, resolve their sibling board files
+        for lp in idf_lib_paths:
+            bp = self._resolve_sibling_bdf(lp)
+            if bp is None:
+                if not step_paths and not idf_board_paths:
+                    ignored += 1
+                continue
+            bkey = os.path.normcase(str(bp))
+            if bkey in linked_bdfs_this_call or bkey in seen_bdfs:
+                continue
+            seen_bdfs.add(bkey)
+            standalone_pairs.append((bp, lp))
+
+        for bp, lp in standalone_pairs:
+            bkey = os.path.normcase(str(bp))
+            if bkey in known_idf_only:
+                ignored += 1
+                continue
+            known_idf_only.add(bkey)
+            self._items.append(
+                PcbBatchItem(
+                    path=None,
+                    bdf_path=bp,
+                    ldf_path=lp,
+                    idf_source="only",
+                )
+            )
+            added_idf_only += 1
+
+        total_added = added_step + added_idf_only
+        if total_added:
+            self._config.last_open_dir = remember_last_open_dir(
+                self._items[-1].source_path, self._config_path
+            )
+            start = len(self._items) - total_added
+            self._refresh_tree(selected=range(start, len(self._items)))
+            msg_parts: list[str] = []
+            if added_step:
+                idf_note = f" ({idf_linked} auto-linked with IDF)" if idf_linked else ""
+                msg_parts.append(f"{added_step} PCB STEP file(s){idf_note}")
+            if added_idf_only:
+                msg_parts.append(f"{added_idf_only} IDF-only PCB job(s)")
+            self._log_panel.append_log(
+                f"Added {' + '.join(msg_parts)} — {len(self._items)} item(s) queued."
+            )
+        if ignored:
+            self._log_panel.append_log(
+                f"Ignored {ignored} item(s): unsupported type, missing, or already queued."
+            )
+        self._update_controls()
+
+    def queue_idf_pairs(self, pairs: Iterable[tuple[Path, Optional[Path]]]) -> int:
+        """Append one or more standalone IDF-only PCB items (without a STEP file)."""
+        if self._running:
+            return 0
+
+        known_idf_only = {
+            os.path.normcase(str(item.bdf_path))
+            for item in self._items
+            if item.is_idf_only and item.bdf_path is not None
+        }
+        added = 0
+        ignored = 0
+
+        for raw_bdf, raw_ldf in pairs:
+            try:
+                bp = Path(raw_bdf).expanduser().resolve()
+            except OSError:
+                ignored += 1
+                continue
+            if not bp.is_file() or bp.suffix.lower() not in IDF_BOARD_EXTS:
+                ignored += 1
+                continue
+            bkey = os.path.normcase(str(bp))
+            if bkey in known_idf_only:
+                ignored += 1
+                continue
+            lp: Optional[Path] = None
+            if raw_ldf is not None:
+                try:
+                    cand_lp = Path(raw_ldf).expanduser().resolve()
+                    if cand_lp.is_file():
+                        lp = cand_lp
+                except OSError:
+                    lp = None
+            if lp is None:
+                lp = self._resolve_sibling_ldf(bp)
+
+            known_idf_only.add(bkey)
+            self._items.append(
+                PcbBatchItem(
+                    path=None,
+                    bdf_path=bp,
+                    ldf_path=lp,
+                    idf_source="only",
+                )
+            )
             added += 1
 
         if added:
             self._config.last_open_dir = remember_last_open_dir(
-                self._items[-1].path, self._config_path
+                self._items[-1].source_path, self._config_path
             )
             start = len(self._items) - added
             self._refresh_tree(selected=range(start, len(self._items)))
-            idf_note = f" ({idf_linked} auto-linked with IDF)" if idf_linked else ""
-            self._log_panel.append_log(
-                f"Added {added} PCB STEP file(s){idf_note} — {len(self._items)} file(s) queued."
-            )
+            if added == 1:
+                it = self._items[-1]
+                lib_note = f" + {it.ldf_path.name}" if it.ldf_path else " (no library file)"
+                self._log_panel.append_log(
+                    f"Added IDF-only PCB: {it.bdf_path.name}{lib_note} — {len(self._items)} item(s) queued."
+                )
+            else:
+                self._log_panel.append_log(
+                    f"Added {added} IDF-only PCB job(s) — {len(self._items)} item(s) queued."
+                )
         if ignored:
             self._log_panel.append_log(
-                f"Ignored {ignored} item(s): not a .step/.stp file, missing, or already queued."
+                f"Ignored {ignored} IDF item(s): missing, invalid extension, or already queued."
             )
         self._update_controls()
+        return added
 
     def add_files_dialog(self) -> None:
         if self._running:
@@ -859,6 +1083,8 @@ class PcbPanel(tk.Frame):
             return
         item = self._items[idx]
         if bdf_path is None:
+            if item.is_idf_only:
+                return
             item.bdf_path = None
             item.ldf_path = None
             item.idf_source = "none"
@@ -867,35 +1093,73 @@ class PcbPanel(tk.Frame):
             lp = Path(ldf_path).expanduser().resolve() if ldf_path else None
             # Auto-find matching library file with same stem if only board file was chosen
             if lp is None:
-                for b_ext, l_ext in IDF_EXT_PAIRS:
-                    if bp.suffix.lower() == b_ext:
-                        cand = bp.with_suffix(l_ext)
-                        if cand.is_file():
-                            lp = cand.resolve()
-                            break
-                        # Case-insensitive fallback scan
-                        for sib in bp.parent.iterdir():
-                            if sib.is_file() and sib.stem.lower() == bp.stem.lower() and sib.suffix.lower() == l_ext:
-                                lp = sib.resolve()
-                                break
+                lp = self._resolve_sibling_ldf(bp)
             item.bdf_path = bp
             item.ldf_path = lp
-            item.idf_source = "manual"
+            item.idf_source = "only" if item.is_idf_only else "manual"
         self._update_row(idx)
 
-    def attach_idf_dialog(self) -> None:
-        """Let the user attach IDF (.bdf and optionally .ldf) to the selected STEP row."""
-        if self._running or not self._items:
+    @classmethod
+    def _parse_selected_idf_pairs(cls, selected: Iterable[str | Path]) -> list[tuple[Path, Optional[Path]]]:
+        """Group user-selected IDF board (.bdf/.brd/.emn) & library (.ldf/.pro/.emp) files into pairs."""
+        bdfs: list[Path] = []
+        ldfs: list[Path] = []
+        for raw in selected:
+            p = Path(raw)
+            ext = p.suffix.lower()
+            if ext in IDF_BOARD_EXTS:
+                bdfs.append(p)
+            elif ext in IDF_LIB_EXTS:
+                ldfs.append(p)
+
+        pairs: list[tuple[Path, Optional[Path]]] = []
+        if len(bdfs) == 1 and len(ldfs) <= 1:
+            pairs.append((bdfs[0], ldfs[0] if ldfs else None))
+        elif len(bdfs) >= 1:
+            lib_by_stem: dict[tuple[str, str], Path] = {
+                (os.path.normcase(str(lp.parent)), lp.stem.lower()): lp for lp in ldfs
+            }
+            for bp in bdfs:
+                lp = lib_by_stem.get((os.path.normcase(str(bp.parent)), bp.stem.lower()))
+                pairs.append((bp, lp))
+        elif ldfs:
+            seen: set[str] = set()
+            for lp in ldfs:
+                bp = cls._resolve_sibling_bdf(lp)
+                if bp is not None:
+                    bkey = os.path.normcase(str(bp))
+                    if bkey not in seen:
+                        seen.add(bkey)
+                        pairs.append((bp, lp))
+        return pairs
+
+    def add_idf_dialog(self) -> None:
+        """Open file dialog to add standalone IDF-only PCB model(s) or attach IDF to an unlinked STEP row."""
+        self.attach_idf_dialog(force_attach=False)
+
+    def attach_idf_dialog(self, *, force_attach: bool = False) -> None:
+        """Select IDF (.bdf/.ldf) files to attach to a selected row or queue as standalone IDF-only PCB(s)."""
+        if self._running:
             return
-        sel = [int(iid) for iid in self._tree.selection()]
-        idx = sel[0] if sel else 0
-        if not (0 <= idx < len(self._items)):
-            return
-        item = self._items[idx]
-        init_dir = str(item.path.parent) if item.path.parent.is_dir() else str(Path.cwd())
+        sel = [int(iid) for iid in self._tree.selection() if 0 <= int(iid) < len(self._items)]
+        attach_idx: Optional[int] = None
+        if len(sel) == 1:
+            cand_item = self._items[sel[0]]
+            if force_attach:
+                attach_idx = sel[0]
+            elif cand_item.path is not None and cand_item.bdf_path is None:
+                attach_idx = sel[0]
+
+        if attach_idx is not None and self._items[attach_idx].source_path.parent.is_dir():
+            init_dir = str(self._items[attach_idx].source_path.parent)
+            dlg_title = f"Select IDF Files (.bdf / .ldf) for {self._items[attach_idx].display_name}"
+        else:
+            init_dir = resolve_last_open_dir(self._config_path, fallback=self._config.last_open_dir)
+            dlg_title = "Select IDF Files (.bdf / .ldf)"
+
         selected = filedialog.askopenfilenames(
             parent=self,
-            title=f"Select IDF Files (.bdf / .ldf) for {item.path.name}",
+            title=dlg_title,
             initialdir=init_dir,
             filetypes=[
                 ("IDF Files", ("*.bdf", "*.ldf", "*.brd", "*.pro", "*.emn", "*.emp")),
@@ -906,25 +1170,9 @@ class PcbPanel(tk.Frame):
         )
         if not selected:
             return
-        bdf: Optional[Path] = None
-        ldf: Optional[Path] = None
-        for raw in selected:
-            p = Path(raw)
-            ext = p.suffix.lower()
-            if ext in IDF_BOARD_EXTS and bdf is None:
-                bdf = p
-            elif ext in IDF_LIB_EXTS and ldf is None:
-                ldf = p
 
-        if bdf is None and ldf is not None:
-            # If user only selected .ldf, check for matching .bdf in same directory
-            for b_ext, l_ext in IDF_EXT_PAIRS:
-                if ldf.suffix.lower() == l_ext:
-                    cand = ldf.with_suffix(b_ext)
-                    if cand.is_file():
-                        bdf = cand
-                        break
-        if bdf is None:
+        pairs = self._parse_selected_idf_pairs(selected)
+        if not pairs:
             messagebox.showwarning(
                 "IDF Board File Required",
                 "Please select an IDF board file (.bdf, .brd, or .emn), optionally together with its .ldf library file.",
@@ -932,18 +1180,35 @@ class PcbPanel(tk.Frame):
             )
             return
 
-        self.attach_idf_files(idx, bdf, ldf)
-        self._log_panel.append_log(
-            f"Attached IDF to {item.path.name}: {item.bdf_path.name}"
-            + (f" + {item.ldf_path.name}" if item.ldf_path else " (no library file)")
-        )
+        if attach_idx is not None and len(pairs) == 1:
+            bdf, ldf = pairs[0]
+            item = self._items[attach_idx]
+            self.attach_idf_files(attach_idx, bdf, ldf)
+            self._config.last_open_dir = remember_last_open_dir(bdf, self._config_path)
+            action = "Updated IDF on" if item.is_idf_only else "Attached IDF to"
+            self._log_panel.append_log(
+                f"{action} {item.display_name}: {item.bdf_path.name}"
+                + (f" + {item.ldf_path.name}" if item.ldf_path else " (no library file)")
+            )
+            return
+
+        self.queue_idf_pairs(pairs)
 
     def _clear_selected_idf(self) -> None:
         if self._running:
             return
+        skipped_only = 0
         for iid in self._tree.selection():
             idx = int(iid)
-            self.attach_idf_files(idx, None, None)
+            if 0 <= idx < len(self._items):
+                if self._items[idx].is_idf_only:
+                    skipped_only += 1
+                    continue
+                self.attach_idf_files(idx, None, None)
+        if skipped_only:
+            self._log_panel.append_log(
+                "IDF-only row(s) cannot clear their IDF file — use Remove to delete the row."
+            )
 
     def _on_remove_selected(self) -> None:
         if self._running:
@@ -998,7 +1263,13 @@ class PcbPanel(tk.Frame):
         sel = [int(iid) for iid in self._tree.selection()]
         if not sel or not (0 <= sel[0] < len(self._items)):
             return
-        src = self._items[sel[0]].path
+        item = self._items[sel[0]]
+        src = item.path
+        if src is None:
+            self._log_panel.append_log(
+                f"No original STEP file for IDF-only item {item.display_name}."
+            )
+            return
         if not src.is_file():
             return
         try:
@@ -1018,7 +1289,7 @@ class PcbPanel(tk.Frame):
         output = item.output_path
         if output is None or not Path(output).is_file():
             self._log_panel.append_log(
-                f"No simplified PCB STEP file is available yet for {item.path.name}."
+                f"No simplified PCB STEP file is available yet for {item.display_name}."
             )
             return
         try:
@@ -1046,15 +1317,17 @@ class PcbPanel(tk.Frame):
         if self._running:
             return
         if not self._items:
-            self._log_panel.set_progress(0.0, "Nothing to do — add at least one PCB STEP file first.")
-            self._log_panel.append_log("RUN ignored — no PCB STEP files are queued.")
+            self._log_panel.set_progress(
+                0.0, "Nothing to do — add at least one PCB STEP or IDF file first."
+            )
+            self._log_panel.append_log("RUN ignored — no PCB STEP or IDF files are queued.")
             return
 
         selected = sorted(int(iid) for iid in self._tree.selection())
         targets = [i for i in selected if 0 <= i < len(self._items)]
         if not targets:
             targets = list(range(len(self._items)))
-        targets = [i for i in targets if self._items[i].path.is_file()]
+        targets = [i for i in targets if self._items[i].source_path.is_file()]
         if not targets:
             self._log_panel.set_progress(0.0, "Selected files are missing on disk.")
             self._log_panel.append_log("RUN ignored — the selected file(s) no longer exist.")
@@ -1157,20 +1430,25 @@ class PcbPanel(tk.Frame):
             self._started_count += 1
             item = self._items[idx]
             item.status = ST_RUNNING
-            out_path = default_pcb_output_path(item.path)
+            out_path = default_pcb_output_path(item.source_path)
             item.output_path = out_path
             self._update_row(idx)
             worker_tag = f" [W{slot.slot_id + 1}]" if pool_size > 1 else ""
-            idf_note = f" + IDF ({item.idf_label})" if item.bdf_path else ""
-            self._log_panel.append_log(
-                f"[{self._started_count}/{self._total}] {item.path.name}{idf_note}{worker_tag}"
-            )
+            if item.is_idf_only:
+                self._log_panel.append_log(
+                    f"[{self._started_count}/{self._total}] {item.display_name} ({item.idf_label}){worker_tag}"
+                )
+            else:
+                idf_note = f" + IDF ({item.idf_label})" if item.bdf_path else ""
+                self._log_panel.append_log(
+                    f"[{self._started_count}/{self._total}] {item.display_name}{idf_note}{worker_tag}"
+                )
             slot.item_idx = idx
             slot.file_progress = 0.0
             slot.cmd_id = slot.client.submit(
                 "pcb_simplify",
                 {
-                    "step_path": str(item.path),
+                    "step_path": str(item.path) if item.path is not None else None,
                     "output_path": str(out_path),
                     "bdf_path": str(item.bdf_path) if item.bdf_path else None,
                     "ldf_path": str(item.ldf_path) if item.ldf_path else None,
@@ -1184,7 +1462,7 @@ class PcbPanel(tk.Frame):
         in_flight = sum(s.file_progress for s in active)
         overall = (self._done_count + in_flight) / max(1, self._total)
         idx = slot.item_idx
-        name = self._items[idx].path.name if idx is not None else ""
+        name = self._items[idx].display_name if idx is not None else ""
         if len(active) > 1:
             prefix = f"[{self._done_count}/{self._total} done · {len(active)} active]"
         else:
@@ -1219,7 +1497,7 @@ class PcbPanel(tk.Frame):
                 self._failed_count += 1
                 self._update_row(idx)
                 self._log_panel.append_log(
-                    f"■ Force stopped: {item.path.name} (background CAD worker restarted)"
+                    f"■ Force stopped: {item.display_name} (background CAD worker restarted)"
                 )
         self._finish_batch(stopped=True)
 
@@ -1323,12 +1601,19 @@ class PcbPanel(tk.Frame):
         self._ok_count += 1
         self._update_row(idx)
 
-        prefix = f"    [{item.path.name}] " if self._batch_concurrency > 1 else "    "
+        prefix = f"    [{item.display_name}] " if self._batch_concurrency > 1 else "    "
         for line in res.get("logs", []):
             self._log_panel.append_log(f"{prefix}{line}")
-        self._log_panel.append_log(
-            f"{prefix}Saved: {saved.name} ({orig_mb:.2f} MB -> {new_mb:.2f} MB, -{size_pct:.1f}%)"
-        )
+        if res.get("idf_only") or item.is_idf_only:
+            size_bytes = res.get("size_bytes", 0)
+            size_lbl = (
+                f"{new_mb:.2f} MB" if new_mb >= 0.1 else f"{size_bytes / 1024:.1f} KB"
+            )
+            self._log_panel.append_log(f"{prefix}Saved (from IDF): {saved.name} ({size_lbl})")
+        else:
+            self._log_panel.append_log(
+                f"{prefix}Saved: {saved.name} ({orig_mb:.2f} MB -> {new_mb:.2f} MB, -{size_pct:.1f}%)"
+            )
 
         if self._stop_requested:
             if not self._active_slots():
@@ -1359,7 +1644,7 @@ class PcbPanel(tk.Frame):
             self._done_count += 1
             self._failed_count += 1
             self._update_row(idx)
-            self._log_panel.append_log(f"✖ Failed: {item.path.name} — {message}")
+            self._log_panel.append_log(f"✖ Failed: {item.display_name} — {message}")
         if crashed:
             self._log_panel.append_log(
                 "    Background PCB CAD worker crashed and was restarted — continuing with the next file."
